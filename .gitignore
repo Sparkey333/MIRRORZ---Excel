@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+out/
+release/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+*.log
+fixtures/generated/
+.vite/
+.turbo/

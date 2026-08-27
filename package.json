@@ -1,0 +1,28 @@
+{
+  "name": "mirrorz-excel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MIRRORZ Sheets - an offline-first spreadsheet application that opens, edits and saves Excel-compatible files",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --build --force",
+    "fixtures": "node tools/make-fixtures.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
