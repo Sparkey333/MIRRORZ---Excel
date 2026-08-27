@@ -3,3 +3,7 @@ export * from './lexer.js';
 export * from './parser.js';
 export * from './serialize.js';
 export * from './value.js';
+export * from './registry.js';
+export * from './evaluator.js';
+export * from './store.js';
+export { createRegistry, ALL_FUNCTIONS } from './functions/index.js';

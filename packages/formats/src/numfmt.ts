@@ -1066,111 +1066,96 @@ function renderNumberSection(section: NumberSection, magnitude: number): NumberR
   if (section.percent) n *= 100;
   for (let i = 0; i < section.scale; i++) n /= 1000;
 
-  let intText = '';
-  let fracText = '';
-  let expText = '';
-  let numText = '';
-  let denText = '';
-  let fractionBlank = false;
+  const r: Rendered = {
+    intText: '',
+    fracText: '',
+    expText: '',
+    numText: '',
+    denText: '',
+    fractionBlank: false,
+    magnitude,
+  };
+  let significant: boolean;
 
   if (section.fraction) {
-    const spec = section.fraction;
-    const whole = spec.hasInteger ? Math.floor(n) : 0;
-    const rest = n - whole;
-    const maxDen =
-      spec.fixedDen !== undefined
-        ? spec.fixedDen
-        : Math.pow(10, spec.denPattern.length) - 1;
-    let { num, den } =
-      spec.fixedDen !== undefined
-        ? { num: Math.round(rest * spec.fixedDen), den: spec.fixedDen }
-        : bestFraction(rest, maxDen);
-    let intValue = whole;
-    if (spec.hasInteger && den > 0 && num >= den) {
-      // The approximation rounded the remainder up to a whole unit: 1.9999 with
-      // "# ?/?" is 2, not "1 1/1".
-      intValue += Math.floor(num / den);
-      num %= den;
-    }
-    if (num === 0 && spec.hasInteger) {
-      // Excel blanks the fraction rather than printing "0/1", keeping the
-      // column aligned; the integer is forced to show so the cell is not empty.
-      fractionBlank = true;
-      intText = padInteger(String(intValue), section.intPattern) || '0';
-      numText = ' '.repeat(spec.numPattern.length);
-      denText = ' '.repeat(
-        spec.fixedDen !== undefined ? 0 : spec.denPattern.length,
-      );
-    } else {
-      if (den === 0) den = 1;
-      intText = spec.hasInteger ? padInteger(String(intValue), section.intPattern) : '';
-      numText = padLeft(String(num), spec.numPattern.length);
-      denText =
-        spec.fixedDen !== undefined ? '' : padRight(String(den), spec.denPattern.length);
-    }
-    if (section.grouping) intText = groupThousands(intText);
-    const text = assemble(section, {
-      intText,
-      fracText,
-      expText,
-      numText,
-      denText,
-      fractionBlank,
-      magnitude,
-    });
-    return { text, significant: !(fractionBlank && intValue === 0) };
+    significant = renderFraction(section, section.fraction, n, r);
+  } else if (section.exponent) {
+    significant = renderScientific(section, section.exponent, n, r);
+  } else {
+    const rounded = roundDecimal(n, section.fracPattern.length);
+    r.intText = padInteger(rounded.int, section.intPattern);
+    r.fracText = trimFraction(rounded.frac, section.fracPattern);
+    significant = /[1-9]/.test(rounded.int + rounded.frac);
+  }
+  if (section.grouping) r.intText = groupThousands(r.intText);
+  return { text: assemble(section, r), significant };
+}
+
+function renderFraction(
+  section: NumberSection,
+  spec: FractionSpec,
+  n: number,
+  r: Rendered,
+): boolean {
+  const whole = spec.hasInteger ? Math.floor(n) : 0;
+  const rest = n - whole;
+  const maxDen =
+    spec.fixedDen !== undefined ? spec.fixedDen : Math.pow(10, spec.denPattern.length) - 1;
+  let { num, den } =
+    spec.fixedDen !== undefined
+      ? { num: Math.round(rest * spec.fixedDen), den: spec.fixedDen }
+      : bestFraction(rest, maxDen);
+  if (den < 1) den = 1;
+  let intValue = whole;
+  if (spec.hasInteger && num >= den) {
+    // The approximation rounded the remainder up to a whole unit: 1.9999 with
+    // "# ?/?" is 2, not "1 1/1".
+    intValue += Math.floor(num / den);
+    num %= den;
   }
 
-  if (section.exponent) {
-    const width = Math.max(1, section.intPattern.length);
-    // A mantissa pattern of bare zeros pins the integer digit count; anything
-    // with '#' or '?' steps the exponent in multiples of that width, which is
-    // how "##0.0E+0" produces engineering notation.
-    const stepped = /[#?]/.test(section.intPattern);
-    let exp = n === 0 ? 0 : decimalExponent(n);
-    exp = stepped ? Math.floor(exp / width) * width : exp - (width - 1);
-    let mantissa = n === 0 ? 0 : n / Math.pow(10, exp);
-    let rounded = roundDecimal(mantissa, section.fracPattern.length);
-    if (rounded.int.length > width && n !== 0) {
-      // 9.99 with "0.0E+0" rounds to 10.0; shift a decade and retry.
-      exp += stepped ? width : 1;
-      mantissa = n / Math.pow(10, exp);
-      rounded = roundDecimal(mantissa, section.fracPattern.length);
-    }
-    intText = padInteger(rounded.int, section.intPattern);
-    if (section.grouping) intText = groupThousands(intText);
-    fracText = trimFraction(rounded.frac, section.fracPattern);
-    const sign = exp < 0 ? '-' : section.exponent.sign === '+' ? '+' : '';
-    expText = sign + String(Math.abs(exp)).padStart(section.exponent.digits, '0');
-    const text = assemble(section, {
-      intText,
-      fracText,
-      expText,
-      numText,
-      denText,
-      fractionBlank,
-      magnitude,
-    });
-    return { text, significant: n !== 0 };
+  if (num === 0 && spec.hasInteger) {
+    // Excel blanks the fraction rather than printing "0/1", keeping the column
+    // aligned; the integer is forced to show so the cell is not left empty.
+    r.fractionBlank = true;
+    r.intText = padInteger(String(intValue), section.intPattern) || '0';
+    r.numText = ' '.repeat(spec.numPattern.length);
+    r.denText = ' '.repeat(spec.denPattern.length);
+    return intValue !== 0;
   }
+  r.intText = spec.hasInteger ? padInteger(String(intValue), section.intPattern) : '';
+  r.numText = padLeft(String(num), spec.numPattern.length);
+  // The denominator pads on the right, so that "5   1/4  " and "5   3/10 " line
+  // up under "# ???/???" the way Excel aligns them.
+  r.denText =
+    spec.fixedDen !== undefined ? '' : padRight(String(den), spec.denPattern.length);
+  return true;
+}
 
-  const rounded = roundDecimal(n, section.fracPattern.length);
-  intText = padInteger(rounded.int, section.intPattern);
-  if (section.grouping) intText = groupThousands(intText);
-  fracText = trimFraction(rounded.frac, section.fracPattern);
-  const text = assemble(section, {
-    intText,
-    fracText,
-    expText,
-    numText,
-    denText,
-    fractionBlank,
-    magnitude,
-  });
-  return {
-    text,
-    significant: /[1-9]/.test(rounded.int + rounded.frac),
-  };
+function renderScientific(
+  section: NumberSection,
+  spec: { sign: '+' | '-'; digits: number },
+  n: number,
+  r: Rendered,
+): boolean {
+  const width = Math.max(1, section.intPattern.length);
+  // A mantissa pattern of bare zeros pins the integer digit count; anything with
+  // '#' or '?' steps the exponent in multiples of that width, which is how
+  // "##0.0E+0" produces engineering notation.
+  const stepped = /[#?]/.test(section.intPattern);
+  let exp = n === 0 ? 0 : decimalExponent(n);
+  exp = stepped ? Math.floor(exp / width) * width : exp - (width - 1);
+  let rounded = roundDecimal(n === 0 ? 0 : n / Math.pow(10, exp), section.fracPattern.length);
+  if (rounded.int.length > width && n !== 0) {
+    // 9.99 with "0.0E+0" rounds to 10.0; shift a decade and try again.
+    exp += stepped ? width : 1;
+    rounded = roundDecimal(n / Math.pow(10, exp), section.fracPattern.length);
+  }
+  r.intText = padInteger(rounded.int, section.intPattern);
+  r.fracText = trimFraction(rounded.frac, section.fracPattern);
+  const sign = exp < 0 ? '-' : spec.sign === '+' ? '+' : '';
+  r.expText = sign + String(Math.abs(exp)).padStart(spec.digits, '0');
+  return n !== 0;
 }
 
 interface Rendered {
@@ -1298,6 +1283,8 @@ function renderDateSection(
             ? 24
             : 0;
   const rounded = perDay === 0 ? serial : Math.round(serial * perDay) / perDay;
+  // A date or time outside the representable range is a '#' fill in Excel, not
+  // a wrapped-around calendar date, so refuse rather than invent one.
   if (rounded < 0) return undefined;
 
   const parts = serialToParts(rounded, system);
@@ -1347,23 +1334,12 @@ function renderDateSection(
         out += '.' + String(scaled).padStart(p.width, '0');
         break;
       }
-      case 'ampm':
-        out += p.long
-          ? p.upper
-            ? pm
-              ? 'PM'
-              : 'AM'
-            : pm
-              ? 'pm'
-              : 'am'
-          : p.upper
-            ? pm
-              ? 'P'
-              : 'A'
-            : pm
-              ? 'p'
-              : 'a';
+      case 'ampm': {
+        // The code's own case is kept: "AM/PM" prints PM, "am/pm" prints pm.
+        const word = p.long ? (pm ? 'PM' : 'AM') : pm ? 'P' : 'A';
+        out += p.upper ? word : word.toLowerCase();
         break;
+      }
       case 'elapsed': {
         const total =
           p.unit === 'h'
@@ -1414,37 +1390,29 @@ function conditionMatches(c: Condition, v: number): boolean {
   }
 }
 
-interface Choice {
-  section: Section;
-  index: number;
-  conditional: boolean;
-}
-
-function chooseSection(compiled: CompiledFormat, value: number): Choice | undefined {
+/**
+ * Pick the section a number belongs in.
+ *
+ * One section covers every number. Two split at zero, with zero joining the
+ * positives. Three give zero its own. Conditions override all of that: the
+ * first section whose test passes wins, and an unconditioned section acts as
+ * the "otherwise" arm.
+ */
+function chooseSection(compiled: CompiledFormat, value: number): Section | undefined {
   const sections = compiled.numericSections;
   if (sections.length === 0) return undefined;
   if (sections.some((s) => s.condition)) {
-    for (let i = 0; i < sections.length; i++) {
-      const s = sections[i] as Section;
-      if (s.condition && conditionMatches(s.condition, value)) {
-        return { section: s, index: i, conditional: true };
-      }
-    }
-    for (let i = 0; i < sections.length; i++) {
-      const s = sections[i] as Section;
-      // The first unconditioned section is the "otherwise" arm. With none,
-      // Excel gives up and fills the cell with '#'.
-      if (!s.condition) return { section: s, index: i, conditional: true };
-    }
-    return undefined;
+    const matched = sections.find(
+      (s) => s.condition && conditionMatches(s.condition, value),
+    );
+    if (matched) return matched;
+    // With no "otherwise" arm the value meets no criterion, and ECMA-376 says
+    // to fill the cell with '#'. LibreOffice quietly falls back to General.
+    return sections.find((s) => !s.condition);
   }
-  if (sections.length === 1) return { section: sections[0] as Section, index: 0, conditional: false };
-  if (sections.length === 2) {
-    const i = value < 0 ? 1 : 0;
-    return { section: sections[i] as Section, index: i, conditional: false };
-  }
-  const i = value > 0 ? 0 : value < 0 ? 1 : 2;
-  return { section: sections[i] as Section, index: i, conditional: false };
+  if (sections.length === 1) return sections[0];
+  if (sections.length === 2) return sections[value < 0 ? 1 : 0];
+  return sections[value > 0 ? 0 : value < 0 ? 1 : 2];
 }
 
 // --- public entry points --------------------------------------------------
@@ -1477,9 +1445,8 @@ export function formatCompiled(
     return { text: '#NUM!', numeric: true, overflow: false };
   }
 
-  const choice = chooseSection(compiled, serial);
-  if (!choice) return { text: '', numeric: true, overflow: true };
-  const { section } = choice;
+  const section = chooseSection(compiled, serial);
+  if (!section) return { text: '', numeric: true, overflow: true };
   const color = section.color;
 
   if (section.kind === 'general') {

@@ -69,6 +69,16 @@ describe('field splitting', () => {
     expect(fields('a,b\n')).toEqual([['a', 'b']]);
   });
 
+  it('reads a wholly empty input as no rows at all', () => {
+    // The degenerate case: a single row holding a single empty field serialises
+    // to an empty string, and an empty string is indistinguishable from an
+    // empty file. Reading it back as zero rows matches what a spreadsheet does
+    // with an empty CSV - it opens a blank sheet, not a sheet with one blank
+    // cell - so write-then-read is deliberately NOT the identity here.
+    expect(writeRows([['']])).toBe('');
+    expect(parseDelimited('').rows).toEqual([]);
+  });
+
   it('keeps an interior blank line as an empty row', () => {
     expect(fields('a\n\nb')).toEqual([['a'], [''], ['b']]);
   });
