@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { readXlsx } from '/home/user/MIRRORZ---Excel/packages/formats/src/xlsx/read.js';
-const { workbook } = readXlsx(new Uint8Array(readFileSync('fixtures/generated/formulas.calc.xlsx')));
+const { workbook } = readXlsx(new Uint8Array(readFileSync('fixtures/generated/precedence.calc.xlsx')));
 for (const name of workbook.sheets.map(s=>s.name)) {
   const sh = workbook.getSheet(name)!;
   console.log('=== SHEET', name);
