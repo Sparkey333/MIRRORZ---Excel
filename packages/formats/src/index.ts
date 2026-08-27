@@ -1,3 +1,4 @@
+export * from './inflate.js';
 export * from './zip.js';
 export * from './xml.js';
 export * from './opc.js';

@@ -1092,6 +1092,24 @@ function fCdf(x: number, df1: number, df2: number): number {
   return betaI(df1 / 2, df2 / 2, (df1 * x) / (df1 * x + df2));
 }
 
+/**
+ * The right tail, evaluated directly rather than as 1 - fCdf.
+ *
+ * The identity I_z(a,b) = 1 - I_(1-z)(b,a) lets the small tail be computed as a
+ * small number instead of as the difference of two numbers near one, which is
+ * what makes F.DIST.RT usable out where the probability is 1e-12 rather than
+ * silently accurate to only five digits.
+ */
+function fSf(x: number, df1: number, df2: number): number {
+  if (x <= 0) return 1;
+  return betaI(df2 / 2, df1 / 2, df2 / (df1 * x + df2));
+}
+
+/** The Student t right tail, by the same argument, using the symmetry of t. */
+function studentTSf(x: number, df: number): number {
+  return studentTCdf(-x, df);
+}
+
 function fPdf(x: number, df1: number, df2: number): number {
   if (x < 0) return 0;
   if (x === 0) return df1 < 2 ? Number.POSITIVE_INFINITY : df1 === 2 ? 1 : 0;
@@ -1547,8 +1565,11 @@ const DISPERSION: FunctionSpec[] = [
     'Calculates population variance, counting text as zero.',
     (n) => varianceOf(n, false),
   ),
+  // DEVSQ and AVEDEV disagree about the empty set, and deliberately: DEVSQ
+  // reaches its mean through a division that fails, while AVEDEV reports the
+  // domain error. The oracle distinguishes them the same way.
   aggregate('DEVSQ', Mode.Numbers, 'Returns the sum of squares of deviations.', (nums) =>
-    nums.length === 0 ? CellError.NUM : finite(devsqOf(nums)),
+    nums.length === 0 ? CellError.DIV0 : finite(devsqOf(nums)),
   ),
   aggregate('AVEDEV', Mode.Numbers, 'Returns the average of absolute deviations.', (nums) => {
     if (nums.length === 0) return CellError.NUM;
@@ -2056,7 +2077,7 @@ const NORMAL: FunctionSpec[] = [
       // A single observation leaves no degrees of freedom, so the t quantile
       // does not exist rather than being out of range.
       if (n === 1) return CellError.DIV0;
-      const t = invertCdf((x) => studentTCdf(x, n - 1), 1 - alpha / 2, 0, Number.POSITIVE_INFINITY);
+      const t = invertCdf((x) => -2 * studentTSf(x, n - 1), -alpha, 0, Number.POSITIVE_INFINITY);
       if (isError(t)) return t;
       return finite((t * sd) / Math.sqrt(n));
     },
@@ -2092,7 +2113,7 @@ const STUDENT_T: FunctionSpec[] = [
       const df = intArg(args[1]);
       if (isError(df)) return df;
       if (df < 1 || x < 0) return CellError.NUM;
-      return 2 * (1 - studentTCdf(x, df));
+      return 2 * studentTSf(x, df);
     },
   },
   {
@@ -2107,7 +2128,7 @@ const STUDENT_T: FunctionSpec[] = [
       const df = intArg(args[1]);
       if (isError(df)) return df;
       if (df < 1) return CellError.NUM;
-      return 1 - studentTCdf(x, df);
+      return studentTSf(x, df);
     },
   },
   {
@@ -2141,7 +2162,9 @@ const STUDENT_T: FunctionSpec[] = [
       const df = intArg(args[1]);
       if (isError(df)) return df;
       if (df < 1 || prob <= 0 || prob > 1) return CellError.NUM;
-      return invertCdf((x) => studentTCdf(x, df), 1 - prob / 2, 0, Number.POSITIVE_INFINITY);
+      // Negated so the search sees an increasing function while the target
+      // stays the small tail probability rather than 1 minus it.
+      return invertCdf((x) => -2 * studentTSf(x, df), -prob, 0, Number.POSITIVE_INFINITY);
     },
   },
 ];
@@ -2184,7 +2207,7 @@ const FISHER_F: FunctionSpec[] = [
       const df2 = intArg(args[2]);
       if (isError(df2)) return df2;
       if (x < 0 || df1 < 1 || df2 < 1) return CellError.NUM;
-      return 1 - fCdf(x, df1, df2);
+      return fSf(x, df1, df2);
     },
   },
   {
@@ -2221,7 +2244,7 @@ const FISHER_F: FunctionSpec[] = [
       if (prob < 0 || prob > 1 || df1 < 1 || df2 < 1) return CellError.NUM;
       if (prob === 1) return 0;
       if (prob === 0) return CellError.NUM;
-      return invertCdf((x) => fCdf(x, df1, df2), 1 - prob, 0, Number.POSITIVE_INFINITY);
+      return invertCdf((x) => -fSf(x, df1, df2), -prob, 0, Number.POSITIVE_INFINITY);
     },
   },
 ];
@@ -2288,7 +2311,7 @@ const CHI_SQUARE: FunctionSpec[] = [
       if (prob < 0 || prob > 1 || df < 1) return CellError.NUM;
       if (prob === 1) return 0;
       if (prob === 0) return CellError.NUM;
-      return invertCdf((x) => chiSqCdf(x, df), 1 - prob, 0, Number.POSITIVE_INFINITY);
+      return invertCdf((x) => -gammaQ(df / 2, x / 2), -prob, 0, Number.POSITIVE_INFINITY);
     },
   },
 ];
@@ -2329,7 +2352,7 @@ const DISCRETE: FunctionSpec[] = [
       if (isError(prob)) return prob;
       const alpha = numArg(args[2]);
       if (isError(alpha)) return alpha;
-      if (n < 0 || prob < 0 || prob > 1 || alpha <= 0 || alpha >= 1) return CellError.NUM;
+      if (n < 0 || prob < 0 || prob > 1 || alpha < 0 || alpha > 1) return CellError.NUM;
       // The CDF is non-decreasing in k, so the smallest qualifying k is found by
       // bisection rather than by summing terms from zero.
       let lo = 0;
@@ -2682,7 +2705,9 @@ const HYPOTHESIS_TESTS: FunctionSpec[] = [
       }
       if (sigma <= 0) return CellError.NUM;
       const z = (excelSub(meanOf(nums), x) / sigma) * Math.sqrt(nums.length);
-      return 1 - normCdf(z);
+      // normCdf(-z) rather than 1 - normCdf(z): the difference is invisible in
+      // the middle and everything in the tail this test is usually read in.
+      return normCdf(-z);
     },
   },
   {
@@ -2744,7 +2769,7 @@ const HYPOTHESIS_TESTS: FunctionSpec[] = [
           df = (se * se) / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1));
         }
       }
-      const rightTail = 1 - studentTCdf(t, df);
+      const rightTail = studentTSf(t, df);
       return tails === 1 ? rightTail : 2 * rightTail;
     },
   },
@@ -2764,7 +2789,7 @@ const HYPOTHESIS_TESTS: FunctionSpec[] = [
       if (isError(v2)) return v2;
       if (v1 === 0 || v2 === 0) return CellError.DIV0;
       const ratio = v1 / v2;
-      let tail = 1 - fCdf(ratio, xs.length - 1, ys.length - 1);
+      let tail = fSf(ratio, xs.length - 1, ys.length - 1);
       // The statistic may land in either tail depending on which sample happened
       // to be more variable; the reported probability is always two-sided.
       if (tail > 0.5) tail = 1 - tail;

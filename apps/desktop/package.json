@@ -9,7 +9,7 @@
     "build": "npm run build:renderer && npm run build:shell",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.main.config.ts",
-    "dev:electron": "npm run build:shell && cross-env-less MIRRORZ_DEV_SERVER=http://localhost:5273 electron .",
+    "dev:electron": "npm run build:shell && electron .",
     "build:renderer": "vite build",
     "build:shell": "vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",

@@ -10,6 +10,8 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
+// Installs Node's zlib over the portable codec; side-effect import.
+import '@mirrorz/formats/node';
 import { basename, extname } from 'node:path';
 import {
   CellError,

@@ -13,7 +13,7 @@
  * 65535 entries.
  */
 
-import { deflateRawSync, inflateRawSync } from 'node:zlib';
+import { type InflateOptions, getCodec } from './inflate.js';
 
 const SIG_LOCAL = 0x0403_4b50;
 const SIG_CENTRAL = 0x0201_4b50;
@@ -263,7 +263,9 @@ function makeEntry(buf: Uint8Array, view: DataView, verifyCrc: boolean, raw: Raw
       if (raw.method === METHOD_STORE) {
         out = compressed;
       } else if (raw.method === METHOD_DEFLATE) {
-        out = new Uint8Array(inflateRawSync(compressed));
+        const options: InflateOptions = { maxSize: 2 * 1024 * 1024 * 1024 };
+        if (raw.uncompressedSize > 0) options.expectedSize = raw.uncompressedSize;
+        out = getCodec().inflateRaw(compressed, options);
       } else {
         throw new ZipError(`unsupported compression method ${raw.method} for ${raw.name}`);
       }
@@ -370,7 +372,7 @@ export function writeZip(entries: ZipWriteEntry[], options: ZipWriteOptions = {}
     let method = METHOD_STORE;
     let payload = entry.data;
     if (!entry.store && entry.data.length > 0) {
-      const deflated = new Uint8Array(deflateRawSync(entry.data, { level }));
+      const deflated = getCodec().deflateRaw(entry.data, level);
       // Only take the compressed form if it actually saved bytes.
       if (deflated.length < entry.data.length) {
         method = METHOD_DEFLATE;

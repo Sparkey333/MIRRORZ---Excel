@@ -8,6 +8,7 @@ export default defineConfig({
       'apps/*/test/**/*.test.ts',
     ],
     environment: 'node',
+    setupFiles: ['packages/formats/test/setup-node-codec.ts'],
     testTimeout: 30_000,
     coverage: {
       provider: 'v8',

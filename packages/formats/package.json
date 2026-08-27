@@ -10,6 +10,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./node": {
+      "types": "./src/zip-node.ts",
+      "default": "./src/zip-node.ts"
+    },
     "./numfmt": {
       "types": "./src/numfmt.ts",
       "default": "./src/numfmt.ts"
