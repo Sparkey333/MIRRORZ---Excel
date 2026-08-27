@@ -54,6 +54,8 @@ export type CsvWarningCode =
   | 'ragged-row'
   /** Characters between a closing quote and the next delimiter. */
   | 'text-after-quote'
+  /** A double quote inside a field that did not start with one. */
+  | 'quote-in-unquoted-field'
   /** End of input reached inside a quoted field. */
   | 'unterminated-quote'
   /** Two or more candidate delimiters scored equally well. */
@@ -158,12 +160,44 @@ export const DEFAULT_DELIMITER_CANDIDATES: readonly string[] = [',', ';', '\t', 
 // ---------------------------------------------------------------------------
 
 /**
+ * windows-1252, as the WHATWG Encoding Standard defines it.
+ *
+ * The table is written out rather than handed to `TextDecoder`, because that
+ * label - like `utf-16be` - resolves only in builds carrying full ICU data and
+ * throws a RangeError everywhere else. Only the 0x80-0x9F range differs from
+ * Latin-1; the five bytes Microsoft leaves undefined (0x81, 0x8D, 0x8F, 0x90,
+ * 0x9D) map to the matching C1 control, which is what the Encoding Standard
+ * specifies and what every browser does.
+ */
+const CP1252_80_9F = [
+  0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039,
+  0x0152, 0x008d, 0x017d, 0x008f, 0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178,
+] as const;
+
+function decodeWindows1252(bytes: Uint8Array): string {
+  const units = new Uint16Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i]!;
+    units[i] = b >= 0x80 && b <= 0x9f ? CP1252_80_9F[b - 0x80]! : b;
+  }
+  // Chunked, because spreading a multi-megabyte array blows the argument limit.
+  const CHUNK = 0x8000;
+  if (units.length <= CHUNK) return String.fromCharCode(...units);
+  let out = '';
+  for (let i = 0; i < units.length; i += CHUNK) {
+    out += String.fromCharCode(...units.subarray(i, i + CHUNK));
+  }
+  return out;
+}
+
+/**
  * Decode a byte buffer, honouring a byte-order mark unless told otherwise.
  *
  * UTF-16BE is byte-swapped and handed to the little-endian decoder rather than
  * named directly, because the big-endian label is only available in Node builds
  * with full ICU and we will not have the behaviour depend on how Node was
- * compiled.
+ * compiled. windows-1252 has the same problem and is decoded from a table here.
  */
 export function decodeCsvBytes(
   bytes: Uint8Array,
@@ -182,6 +216,9 @@ export function decodeCsvBytes(
       swapped[i + 1] = body[i]!;
     }
     return { text: new TextDecoder('utf-16le').decode(swapped), encoding };
+  }
+  if (encoding === 'windows-1252') {
+    return { text: decodeWindows1252(body), encoding };
   }
   return { text: new TextDecoder(encoding).decode(body), encoding };
 }
@@ -221,7 +258,7 @@ export interface CsvParserSink {
  * inside an unquoted field is literal data, and text after a closing quote is
  * appended rather than discarded; both raise a warning instead of an error,
  * because the alternative is refusing to open a file that every other tool
- * opens.
+ * opens. At most one such warning is raised per field.
  */
 export class CsvRowParser {
   private field = '';
@@ -235,7 +272,8 @@ export class CsvRowParser {
   private pendingCR = false;
   /** A CR was written into a quoted field, so a following LF is its pair. */
   private quotedCR = false;
-  private junkWarned = false;
+  /** This field has already been complained about; one warning per field. */
+  private malformedWarned = false;
   private halted = false;
 
   constructor(
@@ -341,14 +379,27 @@ export class CsvRowParser {
       this.fieldWasQuoted = true;
       return;
     }
-    if (this.fieldWasQuoted && !this.junkWarned) {
-      this.junkWarned = true;
-      this.warn({
-        code: 'text-after-quote',
-        message: `row ${this.index + 1}, field ${this.row.length + 1}: text after a closing quote`,
-        row: this.index,
-        col: this.row.length,
-      });
+    if (!this.malformedWarned) {
+      if (this.fieldWasQuoted) {
+        this.malformedWarned = true;
+        this.warn({
+          code: 'text-after-quote',
+          message: `row ${this.index + 1}, field ${this.row.length + 1}: text after a closing quote`,
+          row: this.index,
+          col: this.row.length,
+        });
+      } else if (ch === QUOTE) {
+        // Reached only when the field already has content, since a quote in
+        // first position opens a quoted field. RFC 4180 has no reading for it,
+        // so it is kept as data - but the file is malformed and says so.
+        this.malformedWarned = true;
+        this.warn({
+          code: 'quote-in-unquoted-field',
+          message: `row ${this.index + 1}, field ${this.row.length + 1}: quote inside an unquoted field`,
+          row: this.index,
+          col: this.row.length,
+        });
+      }
     }
     this.field += ch;
   }
@@ -357,7 +408,7 @@ export class CsvRowParser {
     this.row.push(this.field);
     this.field = '';
     this.fieldWasQuoted = false;
-    this.junkWarned = false;
+    this.malformedWarned = false;
     this.quotedCR = false;
   }
 
@@ -388,6 +439,16 @@ export interface DelimiterScore {
 }
 
 /**
+ * Characters of the input examined when guessing the delimiter.
+ *
+ * The row cap alone is not a bound: a file with no line terminator at all - one
+ * 500 MB line, which is exactly what a hostile or truncated upload looks like -
+ * never reaches the row limit, and every candidate would scan the whole string.
+ * A megabyte holds far more than the twenty rows the heuristic wants.
+ */
+const DETECT_SAMPLE_CHARS = 1 << 20;
+
+/**
  * Guess the delimiter by splitting the sample with each candidate and seeing
  * which one produces a consistent table.
  *
@@ -396,6 +457,8 @@ export interface DelimiterScore {
  * yet only the latter forms rectangular rows. Consistency of the field count is
  * the signal that actually distinguishes a delimiter from ordinary punctuation,
  * and it is computed through the real parser so quoted commas do not count.
+ *
+ * Only the first `sampleRows` rows of the first megabyte are examined.
  */
 export function detectDelimiter(
   text: string,
@@ -403,6 +466,7 @@ export function detectDelimiter(
 ): { delimiter: string; confident: boolean; scores: DelimiterScore[] } {
   const candidates = options.candidates ?? DEFAULT_DELIMITER_CANDIDATES;
   const sampleRows = options.sampleRows ?? 20;
+  const sample = text.length > DETECT_SAMPLE_CHARS ? text.slice(0, DETECT_SAMPLE_CHARS) : text;
 
   const scores: DelimiterScore[] = candidates.map((delimiter) => {
     const counts: number[] = [];
@@ -414,7 +478,7 @@ export function detectDelimiter(
         return counts.length < sampleRows;
       },
     });
-    parser.push(text);
+    parser.push(sample);
     parser.end();
 
     if (counts.length === 0) return { delimiter, fields: 0, consistency: 0, rows: 0 };
@@ -673,7 +737,10 @@ function parseNumber(s: string): InferredValue | undefined {
   if (Object.is(value, -0)) value = 0;
 
   if (percent) {
-    const places = fracPart.replace(/0+$/, '').length;
+    // As many decimals as the text showed: "50.00%" is a measurement written to
+    // two places and must come back out as "50.00%", not "50%". An exponent
+    // moves the point, so the count is taken after applying it.
+    const places = Math.max(0, fracPart.length - Number(exp ?? 0));
     return { value, numFmt: places > 0 ? `0.${'0'.repeat(places)}%` : '0%' };
   }
   return { value };
@@ -699,7 +766,11 @@ function parseDateLike(s: string, options: CsvInferenceOptions): InferredValue |
       const serial =
         dateToSerial(date.y, date.m, date.d, time?.h ?? 0, time?.mi ?? 0, time?.s ?? 0, system) +
         (time?.frac ?? 0);
-      if (serial < 0) return undefined;
+      // Excel's calendar starts at 1 January 1900 (serial 1) or, in the 1904
+      // system, at 1 January 1904 (serial 0). Serial 0 in the 1900 system is
+      // the fictitious "January 0", so 1899-12-31 is not a date Excel can
+      // hold - it stays text rather than becoming a number that renders wrong.
+      if (serial < (system === 1904 ? 0 : 1)) return undefined;
       if (!time) return { value: serial, numFmt: 'yyyy-mm-dd' };
       return { value: serial, numFmt: time.hasSeconds ? 'yyyy-mm-dd hh:mm:ss' : 'yyyy-mm-dd hh:mm' };
     }
@@ -976,7 +1047,9 @@ export function writeRows(
     out.push(row.map((f) => encodeField(f, delimiter, quoteAll)).join(delimiter));
   }
   let text = out.join(eol);
-  if (text !== '' && (options.trailingNewline ?? true)) text += eol;
+  // Keyed off the row count, not the text: a single row of empty fields is one
+  // row and needs its terminator, or it comes back from the reader as no rows.
+  if (out.length > 0 && (options.trailingNewline ?? true)) text += eol;
   if (options.bom) text = '\uFEFF' + text;
   return text;
 }
@@ -984,16 +1057,28 @@ export function writeRows(
 /**
  * Default rendering for a cell value.
  *
- * Numbers use JavaScript's shortest round-tripping form with the exponent
- * upper-cased, which is both what Excel writes and what our own reader parses
- * back to the identical double.
+ * Numbers are rounded to Excel's fifteen significant digits and then printed in
+ * JavaScript's shortest round-tripping form, with the exponent upper-cased.
+ *
+ * The rounding is not cosmetic. `String(0.1 + 0.2)` is "0.30000000000000004",
+ * seventeen significant digits, which the reader on the other side of this file
+ * deliberately refuses to treat as a number - so a computed cell would leave as
+ * a number and come back as text. Excel stores fifteen digits and writes "0.3",
+ * which is both what a user expects to see and a value that survives the round
+ * trip. Anything needing a cell's real number format passes a `format` callback.
  */
 export function formatScalar(value: Scalar): string {
   if (value === null) return '';
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
   if (isError(value)) return value.code;
-  if (typeof value === 'number') return String(value).replace('e', 'E');
+  if (typeof value === 'number') return formatNumber(value);
   return value;
+}
+
+function formatNumber(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  const rounded = value === 0 ? 0 : Number(value.toPrecision(MAX_SIGNIFICANT_DIGITS));
+  return String(rounded).replace('e', 'E');
 }
 
 /** Serialise a sheet as delimited text. */
