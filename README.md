@@ -29,7 +29,7 @@ spreadsheet files, not mocks.
 | `.xltx` / `.xltm` | yes | yes | Template variants |
 | `.xls` | yes | - | BIFF8 (Excel 97-2003). Old files open; save them as `.xlsx` |
 | `.csv` / `.tsv` | yes | yes | Delimiter and encoding detection, non-destructive type inference |
-| `.ods` | container | - | Reads the package; sheet parsing is in progress |
+| `.ods` | yes | - | OpenDocument, with OpenFormula translated to the A1 dialect |
 
 The single most important property is **preservation**. The document model is a
 projection over the file, never a replacement for it. Charts, pivot tables,

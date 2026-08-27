@@ -292,6 +292,7 @@ function encodeChunk(
           p += 2;
           d += match.length;
         } else {
+          (globalThis as any).__tokenOverflow = true;
           p = MAX_CHUNK_COMPRESSED;
         }
       } else {

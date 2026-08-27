@@ -10,3 +10,4 @@ export * from './xls/biff.js';
 export * from './xls/read.js';
 export * from './cfb.js';
 export * from './numfmt.js';
+export * from './ods/read.js';

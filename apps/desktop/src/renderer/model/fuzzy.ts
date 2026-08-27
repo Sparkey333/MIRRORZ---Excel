@@ -92,7 +92,10 @@ export function fuzzyMatch(query: string, target: string): FuzzyMatch | null {
     if (i > 0) {
       const gap = pos - positions[i - 1]! - 1;
       if (gap === 0) score += SCORE_CONSECUTIVE;
-      else score -= Math.min(gap, 6) * PENALTY_GAP;
+      // Skipping a whole word to land on the start of the next one is not a
+      // gap, it is how initials work: "sa" meaning Sensitivity Analysis must not
+      // be punished for the eleven characters it stepped over.
+      else if (!isWordStart(target, pos)) score -= Math.min(gap, 6) * PENALTY_GAP;
     }
   }
 
