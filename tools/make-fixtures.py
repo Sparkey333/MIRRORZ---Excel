@@ -505,6 +505,35 @@ def precedence(path: Path) -> dict:
         ("empty_compare", '=Z99=""'),
         ("empty_zero", "=Z99=0"),
         # Range operators.
+        # Numeric-fidelity probes: these decide whether Excel rounds after every
+        # operation, only at display, or applies a targeted snap-to-zero.
+        ("third_times3", "=1/3*3"),
+        ("third_times3_eq", "=1/3*3=1"),
+        ("half_minus_four", "=0.5-0.4"),
+        ("half_minus_four_eq", "=(0.5-0.4)=0.1"),
+        ("point1_times3", "=0.1*3"),
+        ("point1_times3_eq", "=0.1*3=0.3"),
+        ("sum_cancel", "=SUM(0.1,0.2)-0.3"),
+        ("sum_cancel_eq", "=SUM(0.1,0.2)-0.3=0"),
+        ("tiny_lost", "=1+1E-20-1"),
+        ("big_cancel", "=1E20+1-1E20"),
+        ("seventeen_digits", "=1.0000000000000002"),
+        ("seventeen_eq", "=1.0000000000000002=1"),
+        ("sixteen_nines", "=0.9999999999999999"),
+        ("prod_chain", "=0.1+0.2-0.3"),
+        ("prod_chain_eq", "=(0.1+0.2-0.3)=0"),
+        ("mul_then_sub", "=0.3*3-0.9"),
+        ("div_precision", "=1/3"),
+        ("div_precision_x3", "=(1/3)*3"),
+        ("sqrt_sq", "=SQRT(2)^2"),
+        ("sqrt_sq_eq", "=SQRT(2)^2=2"),
+        # Does the snap-to-zero apply at every +/- or only the final one? If it
+        # applies to the inner subtraction, amplifying it yields 0; if only the
+        # final operation snaps, the residue survives and this is ~5551.
+        ("amplify_cancel", "=(0.1+0.2-0.3)*1E20"),
+        ("amplify_cancel2", "=(0.5-0.4-0.1)*1E20"),
+        ("amplify_via_cell", "=D50*1E20"),
+        ("inner_residue", "=ABS(0.1+0.2-0.3)>0"),
         # The reference block lives in F40:H45, well clear of the case rows.
         ("range_op", "=SUM(F40:F42)"),
         ("intersect_op", "=SUM(F40:H42 G40:G45)"),
@@ -513,6 +542,9 @@ def precedence(path: Path) -> dict:
     for i in range(40, 46):
         for j, col in enumerate("FGH"):
             ws[f"{col}{i}"] = i + j
+    # A cell holding the cancelled result, to see whether the snap is stored in
+    # the cell value or applied only when the expression is evaluated inline.
+    ws["D50"] = "=0.1+0.2-0.3"
 
     ws["A1"], ws["B1"], ws["C1"] = "case", "text", "result"
     for i, (name, formula) in enumerate(cases, start=2):
