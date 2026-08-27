@@ -69,14 +69,15 @@ describe('field splitting', () => {
     expect(fields('a,b\n')).toEqual([['a', 'b']]);
   });
 
-  it('reads a wholly empty input as no rows at all', () => {
-    // The degenerate case: a single row holding a single empty field serialises
-    // to an empty string, and an empty string is indistinguishable from an
-    // empty file. Reading it back as zero rows matches what a spreadsheet does
-    // with an empty CSV - it opens a blank sheet, not a sheet with one blank
-    // cell - so write-then-read is deliberately NOT the identity here.
-    expect(writeRows([['']])).toBe('');
+  it('distinguishes one empty row from no rows at all', () => {
+    // An empty input is an empty file: zero rows, matching what a spreadsheet
+    // does when it opens a zero-byte CSV. A single row holding one empty field
+    // is a different thing, and writing it emits a line terminator so the two
+    // stay distinguishable and the round trip is an identity.
+    expect(writeRows([['']])).toBe('\r\n');
+    expect(parseDelimited('\r\n').rows).toEqual([['']]);
     expect(parseDelimited('').rows).toEqual([]);
+    expect(parseDelimited(writeRows([['']])).rows).toEqual([['']]);
   });
 
   it('keeps an interior blank line as an empty row', () => {
@@ -138,8 +139,32 @@ describe('RFC 4180 quoting', () => {
     expect(fields('"  padded  ",x')).toEqual([['  padded  ', 'x']]);
   });
 
-  it('treats a quote inside an unquoted field as data', () => {
-    expect(fields('a"b,c')).toEqual([['a"b', 'c']]);
+  it('treats a quote inside an unquoted field as data, and says so', () => {
+    const r = parseDelimited('a"b,c', { delimiter: ',' });
+    expect(r.rows).toEqual([['a"b', 'c']]);
+    // RFC 4180 has no reading for a bare quote in a non-escaped field. Keeping
+    // it as data is the tolerant choice; keeping it silently is not, because
+    // the more likely story is a field that was meant to be quoted and lost a
+    // delimiter's worth of structure on the way.
+    expect(r.warnings.map((w) => w.code)).toEqual(['quote-in-unquoted-field']);
+    expect(r.warnings[0]!.row).toBe(0);
+    expect(r.warnings[0]!.col).toBe(0);
+  });
+
+  it('warns once per field about a stray quote', () => {
+    const r = parseDelimited('a"b"c"d', { delimiter: ',' });
+    expect(r.rows).toEqual([['a"b"c"d']]);
+    expect(r.warnings.filter((w) => w.code === 'quote-in-unquoted-field')).toHaveLength(1);
+  });
+
+  it('does not confuse a stray quote with text after a closing quote', () => {
+    const r = parseDelimited('"a"x,b"c', { delimiter: ',' });
+    expect(r.rows).toEqual([['ax', 'b"c']]);
+    expect(r.warnings.map((w) => w.code)).toEqual(['text-after-quote', 'quote-in-unquoted-field']);
+  });
+
+  it('says nothing about a properly quoted file', () => {
+    expect(parseDelimited('"a","b,c"\n"d",""', { delimiter: ',' }).warnings).toEqual([]);
   });
 
   it('treats a quote after a space as data', () => {
@@ -462,6 +487,21 @@ describe('number inference', () => {
     expect(fmt('50%')).toBe('0%');
   });
 
+  it('keeps the decimals a percentage was written with', () => {
+    // "50.00%" is a measurement quoted to two places; a format of 0% would
+    // redisplay it as "50%" and lose the precision the writer asserted.
+    expect(fmt('50.00%')).toBe('0.00%');
+    expect(fmt('12.50%')).toBe('0.00%');
+    expect(fmt('12.5%')).toBe('0.0%');
+    expect(fmt('0.000%')).toBe('0.000%');
+    expect(val('50.00%')).toBe(0.5);
+  });
+
+  it("counts a percentage's decimals after applying its exponent", () => {
+    expect(fmt('1e2%')).toBe('0%');
+    expect(val('1e2%')).toBe(1);
+  });
+
   it('reads a negative percentage', () => {
     expect(val('-10%')).toBeCloseTo(-0.1, 12);
   });
@@ -571,6 +611,24 @@ describe('date inference', () => {
 
   it('keeps dates before the epoch as text', () => {
     expect(val('1899-12-30')).toBe('1899-12-30');
+  });
+
+  it('keeps the day before serial 1 as text', () => {
+    // Excel's calendar runs from 1/1/1900 (serial 1) to 31/12/9999. Serial 0 is
+    // the fictitious "January 0, 1900", so 1899-12-31 has no serial to become:
+    // importing it as 0 would render as a date nobody wrote.
+    expect(val('1899-12-31')).toBe('1899-12-31');
+    expect(val('1899-12-31 12:00')).toBe('1899-12-31 12:00');
+    expect(val('1900-01-01')).toBe(1);
+  });
+
+  it('holds the last date Excel can represent', () => {
+    expect(val('9999-12-31')).toBe(2958465);
+  });
+
+  it('starts the 1904 system at its own epoch', () => {
+    expect(val('1904-01-01', { dateSystem: 1904 })).toBe(0);
+    expect(val('1903-12-31', { dateSystem: 1904 })).toBe('1903-12-31');
   });
 
   it('keeps a zoned timestamp as text', () => {
