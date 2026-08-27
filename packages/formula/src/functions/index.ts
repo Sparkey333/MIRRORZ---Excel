@@ -14,6 +14,7 @@
 import { FunctionRegistry, type FunctionSpec } from '../registry.js';
 
 import { LOGICAL_FUNCTIONS } from './logical.js';
+import { LOOKUP_FUNCTIONS } from './lookup.js';
 import { MATH_FUNCTIONS } from './math.js';
 import { TEXT_FUNCTIONS } from './text.js';
 // --- category imports go here ---
@@ -21,6 +22,7 @@ import { TEXT_FUNCTIONS } from './text.js';
 /** Every implemented function, in registration order. */
 export const ALL_FUNCTIONS: readonly FunctionSpec[] = [
   ...LOGICAL_FUNCTIONS,
+  ...LOOKUP_FUNCTIONS,
   ...MATH_FUNCTIONS,
   ...TEXT_FUNCTIONS,
   // --- category arrays go here ---

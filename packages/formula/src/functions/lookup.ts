@@ -272,7 +272,7 @@ function findBinary(
     // chosen by the value's own relation to the target, which does not flip.
     if (cmp < 0 && approx === -1) best = mid;
     if (cmp > 0 && approx === 1) best = mid;
-    if (ascending === cmp < 0) lo = mid + 1;
+    if (ascending === (cmp < 0)) lo = mid + 1;
     else hi = mid - 1;
   }
   return approx === 0 ? -1 : best;
@@ -756,7 +756,10 @@ const ADDRESS: FunctionSpec = {
     if (isError(row)) return row;
     const col = intOf(args[1], ctx, 0);
     if (isError(col)) return col;
-    const abs = intOf(args[2], ctx, 1);
+    // An argument left blank by an empty comma keeps the default here rather
+    // than coercing to 0, because ADDRESS(2,3,,FALSE) is a common idiom and
+    // Excel answers R2C3 for it.
+    const abs = args[2] === null ? 1 : intOf(args[2], ctx, 1);
     if (isError(abs)) return abs;
     const a1 = args[3] === undefined ? true : toBoolean(scalarOf(args[3], ctx));
     if (isError(a1)) return a1;
