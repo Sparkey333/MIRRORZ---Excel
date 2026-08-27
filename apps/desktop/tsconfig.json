@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist-types",
+    "rootDir": ".",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "composite": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/**/*", "test/**/*", "vite.config.ts", "vitest.config.ts"]
+}

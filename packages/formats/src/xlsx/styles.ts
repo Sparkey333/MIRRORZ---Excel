@@ -16,51 +16,17 @@
  */
 
 import type { Border, BorderStyle, CellStyle, Color, Fill, Font, PatternType } from '@mirrorz/core';
+import { BUILTIN_NUMBER_FORMATS as BUILTIN, FIRST_CUSTOM_NUMFMT_ID as FIRST_CUSTOM } from '../numfmt.js';
 import { XmlReader, XmlToken, XmlWriter } from '../xml.js';
 
 /**
- * Built-in number formats. Excel implies these rather than storing them, and
- * writing them back explicitly can make Excel reject or mis-render the file, so
- * this table is read-only knowledge: we resolve ids through it and never emit
- * a `numFmt` element for an id below 164.
- *
- * The gaps (5-8, 23-36, 41-44, 50-58) are locale-specific or reserved; Excel
- * fills them differently per language, so an unknown id resolves to General
- * rather than to a guess.
+ * The built-in number formats and the first id available for custom ones live
+ * in numfmt.ts, which owns the format-code language. They are re-exported here
+ * because styles.ts is where callers expect to find them, but there is exactly
+ * one definition: two copies of this table would drift, and a drifted entry
+ * means a date rendering as a bare serial number.
  */
-export const BUILTIN_NUMBER_FORMATS: Readonly<Record<number, string>> = Object.freeze({
-  0: 'General',
-  1: '0',
-  2: '0.00',
-  3: '#,##0',
-  4: '#,##0.00',
-  9: '0%',
-  10: '0.00%',
-  11: '0.00E+00',
-  12: '# ?/?',
-  13: '# ??/??',
-  14: 'mm-dd-yy',
-  15: 'd-mmm-yy',
-  16: 'd-mmm',
-  17: 'mmm-yy',
-  18: 'h:mm AM/PM',
-  19: 'h:mm:ss AM/PM',
-  20: 'h:mm',
-  21: 'h:mm:ss',
-  22: 'm/d/yy h:mm',
-  37: '#,##0 ;(#,##0)',
-  38: '#,##0 ;[Red](#,##0)',
-  39: '#,##0.00;(#,##0.00)',
-  40: '#,##0.00;[Red](#,##0.00)',
-  45: 'mm:ss',
-  46: '[h]:mm:ss',
-  47: 'mmss.0',
-  48: '##0.0E+0',
-  49: '@',
-});
-
-/** Custom formats must use ids from here up; below is reserved for built-ins. */
-export const FIRST_CUSTOM_NUMFMT_ID = 164;
+export { BUILTIN_NUMBER_FORMATS, FIRST_CUSTOM_NUMFMT_ID } from '../numfmt.js';
 
 /**
  * The legacy 56-colour indexed palette, used by `indexed` colours and by all of
@@ -451,7 +417,7 @@ export function resolveXf(tables: StyleTables, index: number): CellStyle {
   const style: CellStyle = {};
   if (numFmtId !== undefined) {
     style.numFmtId = numFmtId;
-    const code = tables.numFmts.get(numFmtId) ?? BUILTIN_NUMBER_FORMATS[numFmtId];
+    const code = tables.numFmts.get(numFmtId) ?? BUILTIN[numFmtId];
     if (code !== undefined) style.numFmt = code;
   }
   if (fontId !== undefined && tables.fonts[fontId]) style.font = tables.fonts[fontId];
@@ -521,7 +487,7 @@ export function writeStyles(tables: StyleTables): string {
 
   // Only custom formats are written; built-in ids are implied by the spec, and
   // redefining them can make Excel reject the file.
-  const custom = [...tables.numFmts].filter(([id]) => id >= FIRST_CUSTOM_NUMFMT_ID);
+  const custom = [...tables.numFmts].filter(([id]) => id >= FIRST_CUSTOM);
   if (custom.length > 0) {
     w.open('numFmts', { count: custom.length });
     for (const [id, code] of custom) w.empty('numFmt', { numFmtId: id, formatCode: code });

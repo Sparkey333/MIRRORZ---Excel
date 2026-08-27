@@ -5,6 +5,17 @@
   "license": "Apache-2.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
-  "dependencies": { "@mirrorz/core": "0.1.0" }
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./numfmt": {
+      "types": "./src/numfmt.ts",
+      "default": "./src/numfmt.ts"
+    }
+  },
+  "dependencies": {
+    "@mirrorz/core": "0.1.0"
+  }
 }

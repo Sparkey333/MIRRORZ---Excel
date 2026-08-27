@@ -6,3 +6,7 @@ export * from './xlsx/styles.js';
 export * from './xlsx/read.js';
 export * from './xlsx/write.js';
 export * from './xlsx/order.js';
+export * from './xls/biff.js';
+export * from './xls/read.js';
+export * from './cfb.js';
+export * from './numfmt.js';
