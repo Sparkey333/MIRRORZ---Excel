@@ -1,3 +1,4 @@
+export * from './commands.js';
 export * from './address.js';
 export * from './serial.js';
 export * from './sheet.js';

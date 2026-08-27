@@ -13,9 +13,13 @@
  * reading are converted (ISO dates yes, "1/2/2024" no, unless the caller states
  * the order). Anything carrying a signal that it is an identifier rather than a
  * quantity stays text: a leading zero, a leading apostrophe, more than fifteen
- * significant digits, a known false-positive shape. And every conversion is
- * expressible as a value plus a number format, so exporting the sheet again
- * reproduces the text that came in.
+ * significant digits, a known false-positive shape. And a conversion that
+ * changes how a value reads carries the number format that renders it back -
+ * dates, times and percentages all do - so exporting the sheet reproduces the
+ * text that came in. Two shapes are converted without one: a grouped "1,234"
+ * and an accounting "(1,234)" become the plain number they denote, and export
+ * writes 1234 and -1234. The value is right and nothing is lost that a format
+ * cannot restore; the punctuation is not preserved.
  *
  * Malformed input is reported, not thrown. A ragged CSV is still worth opening -
  * refusing the whole file because row 4,132 has an extra comma would be useless

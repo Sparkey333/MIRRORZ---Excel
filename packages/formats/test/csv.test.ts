@@ -333,6 +333,41 @@ describe('encoding', () => {
     expect(r.text).toBe('Aé€');
   });
 
+  it('decodes every windows-1252 byte from its own table', () => {
+    // Not delegated to TextDecoder: the "windows-1252" label only resolves in
+    // builds carrying full ICU data, so leaning on it would make a CSV either
+    // open or throw depending on how Node was compiled.
+    const bytes = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) bytes[i] = i;
+    const text = decodeCsvBytes(bytes, 'windows-1252').text;
+    expect(text).toHaveLength(256);
+    // ASCII and the Latin-1 half are the identity.
+    for (const i of [0x00, 0x41, 0x7f, 0xa0, 0xe9, 0xff]) {
+      expect(text.codePointAt(i)).toBe(i);
+    }
+    // The 0x80-0x9F window is where the code page differs from Latin-1.
+    const high = [
+      0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160,
+      0x2039, 0x0152, 0x008d, 0x017d, 0x008f, 0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022,
+      0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178,
+    ];
+    expect([...text.slice(0x80, 0xa0)].map((c) => c.codePointAt(0))).toEqual(high);
+  });
+
+  it('agrees with the platform decoder where the platform has one', () => {
+    let expected: string | undefined;
+    try {
+      expected = new TextDecoder('windows-1252').decode(new Uint8Array([...Array(256).keys()]));
+    } catch {
+      expected = undefined; // A build without full ICU: nothing to compare against.
+    }
+    if (expected !== undefined) {
+      const bytes = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) bytes[i] = i;
+      expect(decodeCsvBytes(bytes, 'windows-1252').text).toBe(expected);
+    }
+  });
+
   it('leaves a UTF-16 BOM alone when UTF-8 is forced', () => {
     // Nonsense in, nonsense out - but no crash, and the mark is not silently
     // eaten as though the file had been understood.
@@ -383,6 +418,15 @@ describe('delimiter detection', () => {
   it('is not confident when two candidates tie', () => {
     const d = detectDelimiter('a,b\tc\n1,2\t3');
     expect(d.confident).toBe(false);
+  });
+
+  it('looks at a bounded prefix, however long the line', () => {
+    // A file with no line terminator never reaches the row cap, so without a
+    // character cap every candidate would scan the whole input - four passes
+    // over an arbitrarily large string before a single row has been read.
+    const text = 'x'.repeat(1 << 20) + ',,,,\n';
+    const d = detectDelimiter(text);
+    expect(d.scores.find((s) => s.delimiter === ',')!.fields).toBe(1);
   });
 
   it('samples only the first rows', () => {
@@ -1006,6 +1050,28 @@ describe('writing a sheet', () => {
     expect(writeCsv(sheet, opts)).toBe('1E+300,1E-300,0.1\n');
   });
 
+  it('renders numbers to Excel\'s fifteen significant digits', () => {
+    // The shortest round-tripping form of a computed double runs to seventeen
+    // digits, which the reader on the other side of this file refuses to take
+    // as a number - a value would leave the sheet numeric and come back text.
+    expect(formatScalar(0.1 + 0.2)).toBe('0.3');
+    expect(formatScalar(1 / 3)).toBe('0.333333333333333');
+    expect(formatScalar(2 / 3)).toBe('0.666666666666667');
+    expect(formatScalar(0.1)).toBe('0.1');
+    expect(formatScalar(-0)).toBe('0');
+    expect(formatScalar(43525)).toBe('43525');
+  });
+
+  it('writes numbers its own reader reads back unchanged', () => {
+    const values = [0.1 + 0.2, 1 / 3, 2 / 3, 1e300, 1e-300, 1e21, 43525, 0.1, -17, 1e-7];
+    for (const v of values) {
+      const written = formatScalar(v);
+      const read = inferValue(written).value;
+      expect(typeof read, `${written} should read back as a number`).toBe('number');
+      expect(formatScalar(read as number)).toBe(written);
+    }
+  });
+
   it('renders errors as their codes', () => {
     const { sheet } = sheetOf([]);
     sheet.setFormula(0, 0, '1/0', CellError.DIV0);
@@ -1107,8 +1173,26 @@ describe('injection sanitising', () => {
   });
 });
 
+describe('package surface', () => {
+  it('is reachable from the package entry point', async () => {
+    // The module is useless to a consumer of @mirrorz/formats until index.ts
+    // re-exports it, and nothing else in the package imports it.
+    const index = (await import('../src/index.js')) as Record<string, unknown>;
+    for (const name of ['readCsv', 'writeCsv', 'parseDelimited', 'inferValue', 'needsQuoting']) {
+      expect(typeof index[name], name).toBe('function');
+    }
+  });
+});
+
 describe('fixtures', () => {
-  const CSVS = ['basic-types.csv', 'formulas.csv', 'features.csv', 'styling.csv', 'edge-cases.csv'];
+  const CSVS = [
+    'basic-types.csv',
+    'formulas.csv',
+    'features.csv',
+    'styling.csv',
+    'edge-cases.csv',
+    'precedence.csv',
+  ];
 
   it.each(CSVS)('%s parses with a comma delimiter', (name) => {
     const r = parseDelimited(fixtureBytes(name));

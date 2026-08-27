@@ -1560,5 +1560,3 @@ export const TEXT_FUNCTIONS: readonly FunctionSpec[] = [
   REGEXREPLACE,
   TEXT,
 ];
-
-const _bad: number = "x";
