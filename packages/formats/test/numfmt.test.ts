@@ -319,6 +319,23 @@ describe('fractions', () => {
     expect(t(0, '# ?/?')).toBe('0    ');
   });
 
+  it('blanks a fixed denominator too, rather than leaving it stranded', () => {
+    // "# ?/16" spells its denominator as a literal. When there is no fraction
+    // to show it has to disappear with the rest, or a whole number renders as
+    // "5   16" - digits that mean nothing. Width is kept so a column of
+    // sixteenths stays aligned.
+    expect(t(5, '# ?/16')).toBe('5     ');
+    expect(t(0, '# ?/16')).toBe('0     ');
+    expect(t(1, '# ??/16')).toBe('1      ');
+    expect(t(5, '# ?/16')).toHaveLength('5 ?/16'.length);
+    expect(t(2.71828, '# ?/16')).toBe('2 11/16');
+  });
+
+  it('keeps a literal that follows a fixed denominator', () => {
+    expect(t(2.5, '# ?/2" in"')).toBe('2 1/2 in');
+    expect(t(2, '# ?/2" in"')).toBe('2     in');
+  });
+
   it('carries into the whole part rather than printing n/n', () => {
     expect(t(1.9999, '# ?/?')).toBe('2    ');
   });
@@ -473,6 +490,19 @@ describe('literals, escapes and spacing', () => {
     expect(t(MAR_15_2023, '[$-409]yyyy')).toBe('2023');
   });
 
+  it('discards a locale tag that carries dashes of its own', () => {
+    // Modern Excel writes BCP-47-ish tags here, not just LCIDs. The currency
+    // string is everything before the *first* dash, so these have none.
+    expect(t(MAR_15_2023, '[$-en-US]yyyy-mm-dd')).toBe('2023-03-15');
+    expect(t(MAR_15_2023, '[$-x-sysdate]yyyy')).toBe('2023');
+    expect(t(1234.5, '[$-en-US]#,##0.00')).toBe('1,234.50');
+    expect(isDateFormat('[$-en-US]yyyy-mm-dd')).toBe(true);
+  });
+
+  it('keeps a currency string with no locale tail', () => {
+    expect(t(1234.5, '[$USD]#,##0.00')).toBe('USD1,234.50');
+  });
+
   it('keeps non-ASCII literals', () => {
     expect(t(MAR_15_2023, 'yyyy"年"m"月"')).toBe('2023年3月');
   });
@@ -490,7 +520,10 @@ describe('month versus minute', () => {
   });
 
   it('reads m after an hour token as minutes', () => {
-    expect(t(0.5678, 'h:mm')).toBe('13:38');
+    // 0.5678 is 13:37:37.92. Excel rounds a time to the finest sub-second
+    // precision the format shows - whole seconds here - and then truncates the
+    // coarser fields, so the minute stays 37 rather than rounding up to 38.
+    expect(t(0.5678, 'h:mm')).toBe('13:37');
     expect(t(0.5678, 'h m s')).toBe('13 37 38');
   });
 
@@ -505,8 +538,8 @@ describe('month versus minute', () => {
   });
 
   it('resolves both meanings in one format', () => {
-    expect(t(45000.5678, 'yyyy-mm-dd hh:mm')).toBe('2023-03-15 13:38');
-    expect(t(45000.5678, 'm/d/yy h:mm')).toBe('3/15/23 13:38');
+    expect(t(45000.5678, 'yyyy-mm-dd hh:mm')).toBe('2023-03-15 13:37');
+    expect(t(45000.5678, 'm/d/yy h:mm')).toBe('3/15/23 13:37');
   });
 
   it('treats three or more m as a month name regardless of neighbours', () => {
@@ -517,7 +550,7 @@ describe('month versus minute', () => {
   });
 
   it('looks past literals when deciding', () => {
-    expect(t(0.5678, 'h"x"mm')).toBe('13x38');
+    expect(t(0.5678, 'h"x"mm')).toBe('13x37');
   });
 
   it('reads m after an elapsed-hour bracket as minutes', () => {
@@ -561,8 +594,8 @@ describe('date and time tokens', () => {
   });
 
   it('switches to a 12-hour clock for AM/PM', () => {
-    expect(t(0.5678, 'h:mm AM/PM')).toBe('1:38 PM');
-    expect(t(0.5678, 'hh AM/PM')).toBe('02 PM');
+    expect(t(0.5678, 'h:mm AM/PM')).toBe('1:37 PM');
+    expect(t(0.5678, 'hh AM/PM')).toBe('01 PM');
     expect(t(0.5, 'h:mm AM/PM')).toBe('12:00 PM');
     expect(t(0, 'h:mm AM/PM')).toBe('12:00 AM');
   });
@@ -579,10 +612,39 @@ describe('date and time tokens', () => {
     expect(t(0.5678, 'h:mm:ss.000')).toBe('13:37:37.920');
   });
 
-  it('rounds the time to the precision it shows', () => {
+  it('rounds the time to whole seconds and truncates from there', () => {
     expect(t(0.9999999, 'hh:mm:ss')).toBe('00:00:00');
     expect(t(0.9999999, 'hh:mm')).toBe('00:00');
     expect(t(45000.99998, 'yyyy-mm-dd hh:mm:ss')).toBe('2023-03-15 23:59:58');
+    // Seconds round; the minute they roll into is then truncated, never
+    // rounded a second time.
+    expect(t(0.5 + 45 / 86_400, 'h:mm')).toBe('12:00');
+    expect(t(0.5 + 59.6 / 86_400, 'h:mm')).toBe('12:01');
+    expect(t(0.5678, 'h:mm:ss')).toBe('13:37:38');
+    // A format with no time fields keeps its own day: a serial a hundredth of
+    // a second short of midnight must not roll into tomorrow.
+    expect(t(45000.9999999, 'yyyy-mm-dd')).toBe('2023-03-15');
+  });
+
+  it('renders serial 0 as Excel does, January 0 1900', () => {
+    // Excel has no day before serial 1, so a bare 0 under a date format shows
+    // "1/0/1900" - not 31 Dec 1899, which is where the epoch actually sits.
+    expect(t(0, 'mm-dd-yy')).toBe('01-00-00');
+    expect(t(0, 'yyyy-mm-dd')).toBe('1900-01-00');
+    expect(t(0.75, 'd-mmm-yy')).toBe('0-Jan-00');
+    expect(t(0.5, 'm/d/yy h:mm')).toBe('1/0/00 12:00');
+    expect(t(0, 'yyyy')).toBe('1900');
+    // The weekday still comes from the serial, and Excel calls day 0 Saturday.
+    expect(t(0, 'dddd')).toBe('Saturday');
+    // Serial 1 is the first real day, and Excel's leap-year bug makes it a
+    // Sunday even though 1 Jan 1900 was a Monday.
+    expect(t(1, 'yyyy-mm-dd dddd')).toBe('1900-01-01 Sunday');
+  });
+
+  it('keeps the weekday on the same day as the date it prints', () => {
+    // A serial a hair under midnight carries into the next day when the time
+    // is rounded; the weekday has to carry with it.
+    expect(t(45000.999999995, 'dddd yyyy-mm-dd')).toBe('Thursday 2023-03-16');
   });
 
   it('reproduces the 1900 phantom leap day', () => {
@@ -629,7 +691,8 @@ describe('elapsed time brackets', () => {
 
   it('pads to the bracket width but never truncates', () => {
     expect(t(0.5, '[h]:mm')).toBe('12:00');
-    expect(t(0.04, '[hh]:mm')).toBe('00:58');
+    // 0.04 of a day is 57 minutes 36 seconds: truncated, not rounded up.
+    expect(t(0.04, '[hh]:mm')).toBe('00:57');
   });
 
   it('handles very long durations', () => {
@@ -697,6 +760,21 @@ describe('text values', () => {
   it('formats a number under the Text format as General', () => {
     expect(t(123, '@')).toBe('123');
     expect(t(0.1 + 0.2, '@')).toBe('0.3');
+  });
+
+  it('keeps the minus on a negative number under @ and General', () => {
+    // The '@' section renders the number itself, so it has to be the signed
+    // value: a cell holding -1 formatted as Text reads "-1", not "1".
+    expect(t(-1, '@')).toBe('-1');
+    expect(t(-0.5, '@')).toBe('-0.5');
+    expect(t(-1.5, 'General" units"')).toBe('-1.5 units');
+    expect(t(-1234.5678, 'General')).toBe('-1234.5678');
+  });
+
+  it('hands a negative section the magnitude, General included', () => {
+    // Once the format splits positives from negatives the second section is
+    // fed the absolute value; a General there must not re-add the sign.
+    expect(t(-5, '0.00;General')).toBe('5');
   });
 
   it('reports text as non-numeric so it never becomes ####', () => {
@@ -771,6 +849,24 @@ describe('column-width overflow', () => {
     expect(overflowText(3.7)).toBe('###');
   });
 
+  it('refuses to allocate an absurd fill', () => {
+    // Widths come out of a file. Excel's widest column is 255 characters, so
+    // nothing beyond that is worth building - and Infinity would throw.
+    expect(overflowText(1e9)).toHaveLength(255);
+    expect(overflowText(Number.POSITIVE_INFINITY)).toBe('#');
+    expect(overflowText(Number.NaN)).toBe('#');
+    expect(overflowText(-5)).toBe('#');
+  });
+
+  it('treats an unusable width as no room', () => {
+    // NaN compares false against everything, so without a guard any text would
+    // slip through the fit check.
+    expect(fitToWidth(format(1234567.891, '#,##0.00'), Number.NaN)).toBe('#');
+    expect(fitToWidth(format(1234567.891, '#,##0.00'), Number.POSITIVE_INFINITY)).toBe(
+      '1,234,567.89',
+    );
+  });
+
   it('replaces a number that does not fit', () => {
     const r = format(1234567.891, '#,##0.00');
     expect(r.text).toBe('1,234,567.89');
@@ -818,6 +914,27 @@ describe('parser robustness', () => {
   it('handles more than four sections without crashing', () => {
     expect(() => t(1, '0;0;0;@;0')).not.toThrow();
   });
+
+  it('keeps at most the four sections the language defines', () => {
+    // A code with more sections is malformed; dropping the tail bounds what a
+    // hostile formatCode can allocate.
+    expect(parseFormat('0;0;0;@;0;0;0').sections).toHaveLength(4);
+    expect(parseFormat(';'.repeat(100_000)).sections).toHaveLength(4);
+  });
+
+  it('lexes a very long code in time proportional to its length', () => {
+    const short = '0'.repeat(20_000);
+    const long = '0'.repeat(200_000);
+    const time = (code: string): number => {
+      const start = performance.now();
+      parseFormat(code);
+      return performance.now() - start;
+    };
+    time(short);
+    const slow = time(long);
+    // Ten times the input must not cost anything like a hundred times the work.
+    expect(slow).toBeLessThan(5_000);
+  });
 });
 
 describe('styling.xlsx fixture', () => {
@@ -854,7 +971,7 @@ describe('styling.xlsx fixture', () => {
     expect(t(MAR_15_2023, code(166))).toBe('2023-03-15');
     expect(t(MAR_15_2023, code(167))).toBe('Wednesday, March 15, 2023');
     expect(t(0.5678, code(168))).toBe('13:37:38');
-    expect(t(45000.5678, code(169))).toBe('2023-03-15 13:38');
+    expect(t(45000.5678, code(169))).toBe('2023-03-15 13:37');
     expect(t(-42, code(170))).toBe('-42.00');
     expect(t(0, code(171))).toBe('zero');
     expect(t(150, code(172))).toBe('big');

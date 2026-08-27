@@ -216,13 +216,17 @@ export function pointsToPixels(points: number): number {
 }
 
 /**
- * Excel's own char-width-to-pixel formula (ECMA-376 §18.3.1.13). The two
- * truncations matter: rounding differently puts every column a pixel or two off
- * from Excel and the drift is visible when comparing screenshots.
+ * Excel's char-width-to-pixel conversion (ECMA-376 §18.3.1.13, which states the
+ * inverse: width = Truncate([{pixels - 5} / MDW * 100 + 0.5] / 100)).
+ *
+ * The constant 5 is the cell's two-pixel padding plus the gridline, and dropping
+ * it is what makes a naive implementation put every column five pixels narrow -
+ * enough that the default 8.43 width comes out as 59px instead of Excel's 64 and
+ * a whole screen of columns drifts visibly out of alignment.
  */
 export function charsToPixels(width: number, maxDigitWidth = DEFAULT_MAX_DIGIT_WIDTH): number {
   if (width <= 0) return 0;
-  return Math.trunc(((256 * width + Math.trunc(128 / maxDigitWidth)) / 256) * maxDigitWidth);
+  return Math.round(width * maxDigitWidth) + 5;
 }
 
 export interface AxisBuildOptions {

@@ -4,14 +4,15 @@
  * Five decisions shape this file.
  *
  * First, references stay references. INDEX, OFFSET and INDIRECT take
- * ArgKind.Reference and hand a RefValue back where Excel does, and CHOOSE
- * returns its chosen argument unaltered (it takes thunks, because Microsoft
- * documents that an unselected value is not evaluated), because
+ * ArgKind.Reference and hand a RefValue back where Excel does, because
  * `A1:INDEX(B1:B9,3)` and `SUM(OFFSET(A1,1,1,3,3))` are ordinary formulas: the
- * result is used as a range operand, not as a value. Dereferencing at the
- * function boundary would turn both into #VALUE!. ROW, COLUMN, ROWS, COLUMNS
- * and AREAS need the reference for the opposite reason - they report on its
- * shape and never look inside it.
+ * result is used as a range operand, not as a value, and dereferencing at the
+ * function boundary would turn both into #VALUE!. CHOOSE arrives at the same
+ * place by another route - its values come in as thunks, because Microsoft
+ * documents that an unselected value is not evaluated, and the chosen one is
+ * returned exactly as it evaluated. ROW, COLUMN, ROWS, COLUMNS and AREAS want
+ * the reference for the opposite reason: they report on its shape and never
+ * look inside it.
  *
  * Second, the volatility declarations follow Microsoft, not folklore. OFFSET
  * and INDIRECT are volatile: their dependencies exist only after the arguments

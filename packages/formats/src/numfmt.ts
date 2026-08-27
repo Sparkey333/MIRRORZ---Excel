@@ -283,17 +283,21 @@ function lexSection(src: string): RawSection {
       i++;
       continue;
     }
-    if (/^general/i.test(src.slice(i))) {
+    // Fixed-width windows rather than a regex against the whole remaining tail:
+    // a `formatCode` in styles.xml has no length a reader can rely on, and
+    // comparing seven characters keeps the cost of each step independent of
+    // how much code is left.
+    if (src.slice(i, i + 7).toLowerCase() === 'general') {
       push({ k: 'general' });
       i += 7;
       continue;
     }
-    if (/^am\/pm/i.test(src.slice(i))) {
+    if (src.slice(i, i + 5).toLowerCase() === 'am/pm') {
       push({ k: 'ampm', long: true, upper: src[i] === 'A' });
       i += 5;
       continue;
     }
-    if (/^a\/p/i.test(src.slice(i))) {
+    if (src.slice(i, i + 3).toLowerCase() === 'a/p') {
       push({ k: 'ampm', long: false, upper: src[i] === 'A' });
       i += 3;
       continue;
@@ -366,11 +370,13 @@ function applyBracket(
     return;
   }
   if (inner.startsWith('$')) {
-    // [$-409] carries only locale; [$USD-409] and [$<eur>-407] also carry a
-    // currency string, which is printed. The locale id is the tail after the
-    // last '-', so a currency containing a dash still survives.
+    // [$-409] carries only locale; [$USD-409] and [$\u20ac-407] also carry a
+    // currency string, which is printed. Everything up to the *first* '-' is
+    // the currency: the tail is locale information, and modern Excel writes it
+    // with dashes of its own ([$-en-US], [$-x-sysdate]), so splitting on the
+    // last dash would print "-en" in front of every such date.
     const body = inner.slice(1);
-    const dash = body.lastIndexOf('-');
+    const dash = body.indexOf('-');
     const currency = dash < 0 ? body : body.slice(0, dash);
     if (currency) push({ k: 'lit', s: currency });
     return;
@@ -397,6 +403,7 @@ type Role =
   | 'num'
   | 'den'
   | 'slash'
+  | 'fixden'
   | 'point'
   | 'drop'
   | 'plain';
@@ -404,7 +411,11 @@ type Role =
 interface Piece {
   lex: Lexeme;
   role: Role;
-  /** Ordinal of this placeholder within its group, for positional filling. */
+  /**
+   * Ordinal of this placeholder within its group, for positional filling.
+   * For a 'fixden' piece it is instead the number of leading characters of the
+   * literal that spell the denominator.
+   */
   slot: number;
 }
 
@@ -489,8 +500,18 @@ export function parseFormat(code: string): CompiledFormat {
   return compiled;
 }
 
+/**
+ * The most sections a format code can have: positive, negative, zero, text.
+ * A code with more is malformed - Excel refuses to accept one - and the tail is
+ * dropped rather than compiled, so a pathological `formatCode` of a million
+ * semicolons cannot turn into a million compiled sections.
+ */
+const MAX_SECTIONS = 4;
+
 function compile(code: string): CompiledFormat {
-  const sections = splitSections(code).map((s) => compileSection(lexSection(s)));
+  const sections = splitSections(code)
+    .slice(0, MAX_SECTIONS)
+    .map((s) => compileSection(lexSection(s)));
   const last = sections[sections.length - 1] as Section;
   // The text section is normally the fourth. It is also any *final* section that
   // carries an '@', because the two-section idiom "0.00;@" is everywhere in real
@@ -771,6 +792,17 @@ function compileNumberSection(raw: RawSection): NumberSection {
       case 'slash':
         role = fraction ? 'slash' : 'plain';
         break;
+      case 'lit':
+        if (fraction?.fixedDenDigits !== undefined && i === slashAt + 1) {
+          // "# ?/16" - the denominator lives inside a literal, so it has to be
+          // blanked along with the rest of the fraction when there is nothing
+          // to show. Anything after the digits ("# ?/16 in") stays a literal.
+          role = 'fixden';
+          slot = fraction.fixedDenDigits;
+        } else {
+          role = 'plain';
+        }
+        break;
       default:
         role = 'plain';
     }
@@ -821,6 +853,7 @@ function describeFraction(
   numPattern: string;
   denPattern: string;
   fixedDen?: number;
+  fixedDenDigits?: number;
 } | undefined {
   let numStart = slashAt;
   let numPattern = '';
@@ -841,7 +874,14 @@ function describeFraction(
   const after = lexemes[slashAt + 1];
   const fixed = after?.k === 'lit' ? /^\d+/.exec(after.s) : null;
   if (!fixed) return undefined;
-  return { numStart, numPattern, denPattern: '', fixedDen: Number(fixed[0]) };
+  const digits = (fixed[0] as string).length;
+  return {
+    numStart,
+    numPattern,
+    denPattern: '',
+    fixedDen: Number(fixed[0]),
+    fixedDenDigits: digits,
+  };
 }
 
 // --- decimal helpers ------------------------------------------------------
@@ -1059,7 +1099,11 @@ interface NumberRender {
   significant: boolean;
 }
 
-function renderNumberSection(section: NumberSection, magnitude: number): NumberRender {
+function renderNumberSection(
+  section: NumberSection,
+  magnitude: number,
+  general: number,
+): NumberRender {
   // Percent scales once however many '%' the section carries, and each trailing
   // comma divides by another thousand.
   let n = magnitude;
@@ -1073,7 +1117,7 @@ function renderNumberSection(section: NumberSection, magnitude: number): NumberR
     numText: '',
     denText: '',
     fractionBlank: false,
-    magnitude,
+    magnitude: general,
   };
   let significant: boolean;
 
@@ -1165,6 +1209,11 @@ interface Rendered {
   numText: string;
   denText: string;
   fractionBlank: boolean;
+  /**
+   * The value a 'General' or '@' token inside this section renders. It carries
+   * the sign, unlike the magnitude the placeholders are filled from, because a
+   * number under the Text format prints as "-1", not "1".
+   */
   magnitude: number;
 }
 
@@ -1217,6 +1266,16 @@ function assemble(section: NumberSection, r: Rendered): string {
       case 'slash':
         out += r.fractionBlank ? ' ' : '/';
         break;
+      case 'fixden': {
+        const text = (piece.lex as { k: 'lit'; s: string }).s;
+        // Spaces rather than nothing: the '?' placeholders around it exist to
+        // keep a column of fractions aligned, and dropping the denominator
+        // would make the blank rows narrower than the rest.
+        out +=
+          (r.fractionBlank ? ' '.repeat(piece.slot) : text.slice(0, piece.slot)) +
+          text.slice(piece.slot);
+        break;
+      }
       case 'exp':
         out += 'E' + r.expText;
         break;
@@ -1269,19 +1328,20 @@ function renderDateSection(
   serial: number,
   system: DateSystem,
 ): string | undefined {
-  // Excel rounds a date/time to the precision it is about to show, which is why
-  // 23:59:59.9 formatted as "h:mm:ss" rolls over to the next day rather than
-  // truncating. LibreOffice truncates instead; we follow Excel.
+  // Excel rounds a time to the smallest *sub-second* precision the format
+  // shows - whole seconds when it shows none - and then truncates every
+  // coarser field. So 13:37:37.92 is "13:37:38" under h:mm:ss but "13:37"
+  // under h:mm, not the "13:38" that rounding to the displayed minute would
+  // give; only the roll-over at 23:59:59.6 reaches the next hour or day.
+  // Checked against LibreOffice, SheetJS SSF and borgar/numfmt, which agree.
+  // A format with no time fields at all is left alone, so a serial a fraction
+  // of a second short of midnight keeps its own date.
   const perDay =
-    section.subsecond > 0
-      ? 86_400 * Math.pow(10, section.subsecond)
-      : section.smallest === 'second'
-        ? 86_400
-        : section.smallest === 'minute'
-          ? 1_440
-          : section.smallest === 'hour'
-            ? 24
-            : 0;
+    section.smallest === 'day'
+      ? 0
+      : section.subsecond > 0
+        ? 86_400 * Math.pow(10, section.subsecond)
+        : 86_400;
   const rounded = perDay === 0 ? serial : Math.round(serial * perDay) / perDay;
   // A date or time outside the representable range is a '#' fill in Excel, not
   // a wrapped-around calendar date, so refuse rather than invent one.
@@ -1290,6 +1350,18 @@ function renderDateSection(
   const parts = serialToParts(rounded, system);
   if (parts.year > 9999 || Number.isNaN(parts.year)) return undefined;
   const totalMs = Math.round(rounded * MS_PER_DAY);
+  // The day the calendar fields came from, carry included: `serialToParts`
+  // rolls a time that rounds up to midnight into the next day, and the weekday
+  // has to roll with it or "dddd d" contradicts itself.
+  const dayNumber = Math.floor(totalMs / MS_PER_DAY);
+  // Excel has no day before serial 1: serial 0 renders as "January 0, 1900",
+  // which is what a cell holding a bare 0 under a date format shows. Deriving
+  // it from the epoch instead would print 31 Dec 1899, a date Excel never
+  // displays.
+  const cal =
+    system === 1900 && dayNumber === 0
+      ? { year: 1900, month: 1, day: 0 }
+      : { year: parts.year, month: parts.month, day: parts.day };
   const hour12 = parts.hour % 12 === 0 ? 12 : parts.hour % 12;
   const pm = parts.hour >= 12;
 
@@ -1299,21 +1371,21 @@ function renderDateSection(
       case 'year':
         out +=
           p.width === 2
-            ? String(parts.year % 100).padStart(2, '0')
-            : String(parts.year).padStart(4, '0');
+            ? String(cal.year % 100).padStart(2, '0')
+            : String(cal.year).padStart(4, '0');
         break;
       case 'month':
-        if (p.width === 1) out += String(parts.month);
-        else if (p.width === 2) out += String(parts.month).padStart(2, '0');
-        else if (p.width === 3) out += (MONTHS_FULL[parts.month - 1] as string).slice(0, 3);
-        else if (p.width === 4) out += MONTHS_FULL[parts.month - 1] as string;
-        else out += (MONTHS_FULL[parts.month - 1] as string).slice(0, 1);
+        if (p.width === 1) out += String(cal.month);
+        else if (p.width === 2) out += String(cal.month).padStart(2, '0');
+        else if (p.width === 3) out += (MONTHS_FULL[cal.month - 1] as string).slice(0, 3);
+        else if (p.width === 4) out += MONTHS_FULL[cal.month - 1] as string;
+        else out += (MONTHS_FULL[cal.month - 1] as string).slice(0, 1);
         break;
       case 'day': {
-        if (p.width === 1) out += String(parts.day);
-        else if (p.width === 2) out += String(parts.day).padStart(2, '0');
+        if (p.width === 1) out += String(cal.day);
+        else if (p.width === 2) out += String(cal.day).padStart(2, '0');
         else {
-          const name = DAYS_FULL[weekdayIndex(rounded, system)] as string;
+          const name = DAYS_FULL[weekdayIndex(dayNumber, system)] as string;
           out += p.width === 3 ? name.slice(0, 3) : name;
         }
         break;
@@ -1353,7 +1425,7 @@ function renderDateSection(
       case 'eraYear':
         // Japanese-era years are not implemented; falling back to the Gregorian
         // year keeps the rest of the format readable instead of crashing.
-        out += p.width >= 2 ? String(parts.year).padStart(4, '0') : String(parts.year);
+        out += p.width >= 2 ? String(cal.year).padStart(4, '0') : String(cal.year);
         break;
       case 'era':
         break;
@@ -1364,9 +1436,14 @@ function renderDateSection(
   return out;
 }
 
-/** Sunday = 0, taken from the serial so the 1900 leap-year bug is preserved. */
-function weekdayIndex(serial: number, system: DateSystem): number {
-  const days = Math.floor(serial);
+/**
+ * Sunday = 0, taken from the day number so the 1900 leap-year bug is preserved.
+ *
+ * The phantom 29 Feb 1900 shifts every weekday before 1 Mar 1900 by one, which
+ * is why Excel calls 1 Jan 1900 a Sunday when it was really a Monday. Deriving
+ * the weekday from the serial rather than the calendar date reproduces that.
+ */
+function weekdayIndex(days: number, system: DateSystem): number {
   if (system === 1904) return ((days % 7) + 5) % 7;
   return (((days - 1) % 7) + 7) % 7;
 }
@@ -1449,8 +1526,15 @@ export function formatCompiled(
   if (!section) return { text: '', numeric: true, overflow: true };
   const color = section.color;
 
+  // What a 'General' or '@' run renders. It carries the sign, unlike the
+  // magnitude the placeholders are filled from - but only where the format did
+  // not already split positives from negatives, since a negative section is
+  // always handed the magnitude and must not re-add the minus.
+  const generalValue =
+    compiled.numericSections.length === 1 ? serial : Math.abs(serial);
+
   if (section.kind === 'general') {
-    return withColor(formatGeneral(serial), color, true, false);
+    return withColor(formatGeneral(generalValue), color, true, false);
   }
   if (section.kind === 'date') {
     const text = renderDateSection(section, serial, system);
@@ -1458,7 +1542,7 @@ export function formatCompiled(
     return withColor(text, color, true, false);
   }
 
-  const rendered = renderNumberSection(section, Math.abs(serial));
+  const rendered = renderNumberSection(section, Math.abs(serial), generalValue);
   // The automatic minus appears only when the format offers no negative section
   // of its own, and never when everything rounded away to zero.
   const needsSign =
@@ -1513,7 +1597,13 @@ export function isDateFormat(code: string): boolean {
  * column widths, and the renderer is the only layer that knows the real one.
  */
 export function overflowText(widthChars: number): string {
-  return '#'.repeat(Math.max(1, Math.floor(widthChars)));
+  // A width arrives from a file, so it can be absent, negative, fractional or
+  // absurd. Excel's widest column is 255 characters; clamping there keeps a
+  // hostile <col width="1e9"/> from asking for a gigabyte-long string, and
+  // NaN - which would otherwise repeat zero times - falls back to one '#'.
+  const width = Math.floor(widthChars);
+  if (!Number.isFinite(width)) return '#';
+  return '#'.repeat(Math.min(255, Math.max(1, width)));
 }
 
 /**
@@ -1525,5 +1615,10 @@ export function overflowText(widthChars: number): string {
 export function fitToWidth(result: FormatResult, widthChars: number): string {
   if (!result.numeric) return result.text;
   if (result.overflow) return overflowText(widthChars);
+  // A NaN width compares false against everything, which would silently let
+  // any text through; treat an unusable width as "no room".
+  if (!Number.isFinite(widthChars)) {
+    return Number.isNaN(widthChars) ? overflowText(widthChars) : result.text;
+  }
   return result.text.length > widthChars ? overflowText(widthChars) : result.text;
 }

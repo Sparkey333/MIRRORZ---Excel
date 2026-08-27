@@ -97,7 +97,7 @@ export interface CfbHeader {
   fatSectorCount: number;
   firstDirectorySector: number;
   transactionSignature: number;
-  /** Streams shorter than this live in the mini stream. Always 4096 in practice. */
+  /** Streams shorter than this live in the mini stream. Validated as 4096, which the format fixes it at. */
   miniStreamCutoff: number;
   firstMiniFatSector: number;
   miniFatSectorCount: number;

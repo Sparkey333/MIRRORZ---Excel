@@ -8,3 +8,6 @@
 
 export * from './compression.js';
 export * from './project.js';
+export * from './lexer.js';
+export * from './parser.js';
+export * from './compat.js';
