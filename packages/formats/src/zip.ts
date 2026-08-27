@@ -76,6 +76,20 @@ export function crc32(data: Uint8Array): number {
  */
 export interface ZipReadOptions {
   /**
+   * Reject any single entry that inflates beyond this many bytes.
+   *
+   * A desktop app opens files that arrive by email, so a zip bomb - a few
+   * kilobytes that inflate to gigabytes - is a real denial-of-service surface,
+   * not a theoretical one. Default is 2 GiB, comfortably above any genuine
+   * worksheet part and far below what would exhaust memory.
+   */
+  maxEntrySize?: number;
+  /**
+   * Reject entries whose compression ratio exceeds this. Legitimate XML
+   * compresses roughly 10-20x; 1000x is not a spreadsheet.
+   */
+  maxCompressionRatio?: number;
+  /**
    * Verify each entry's CRC-32 when its data is decompressed. On by default:
    * returning silently-corrupted cell data is far worse than the few
    * milliseconds a table-driven CRC costs, and a damaged workbook is exactly
@@ -86,6 +100,8 @@ export interface ZipReadOptions {
 
 export function readZip(buf: Uint8Array, options: ZipReadOptions = {}): Map<string, ZipEntry> {
   const verifyCrc = options.verifyCrc ?? true;
+  const maxEntrySize = options.maxEntrySize ?? 2 * 1024 * 1024 * 1024;
+  const maxRatio = options.maxCompressionRatio ?? 1000;
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const eocdOffset = findEocd(buf);
   if (eocdOffset < 0) throw new ZipError('not a ZIP archive: end of central directory not found');
@@ -172,6 +188,18 @@ export function readZip(buf: Uint8Array, options: ZipReadOptions = {}): Map<stri
         }
         e += 4 + dataSize;
       }
+    }
+
+    if (uncompressedSize > maxEntrySize) {
+      throw new ZipError(
+        `entry ${name} declares ${uncompressedSize} bytes, above the ${maxEntrySize}-byte limit`,
+      );
+    }
+    if (compressedSize > 0 && uncompressedSize / compressedSize > maxRatio) {
+      throw new ZipError(
+        `entry ${name} has a compression ratio of ${Math.round(uncompressedSize / compressedSize)}:1, ` +
+          `above the ${maxRatio}:1 limit (possible zip bomb)`,
+      );
     }
 
     const entry = makeEntry(buf, view, verifyCrc, {
