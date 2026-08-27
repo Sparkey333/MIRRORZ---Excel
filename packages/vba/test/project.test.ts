@@ -128,7 +128,6 @@ function buildCfb(tree: BuildNode[]): Uint8Array {
     dv.setUint32(o + 120, entry.size, true);
   }
   const dirStart = allocate(dirBytes);
-  const dirSectorCount = dirBytes.length / SECTOR;
 
   // The FAT has to describe the sectors it occupies, so allocating it grows it.
   const perSector = SECTOR / 4;
@@ -170,7 +169,6 @@ function buildCfb(tree: BuildNode[]): Uint8Array {
   for (let i = 0; i < 109; i++) {
     hv.setUint32(76 + i * 4, i < fatSectorCount ? fatIds[i]! : FREESECT, true);
   }
-  void dirSectorCount;
 
   const out = new Uint8Array(SECTOR + sectors.length * SECTOR);
   out.set(header);
@@ -214,6 +212,8 @@ interface ModuleSpec {
   docString?: string;
   extraRecords?: number[];
   omitTerminator?: boolean;
+  /** Describe the module in dir but do not create its stream. */
+  omitStream?: boolean;
 }
 
 interface ProjectSpec {
@@ -331,6 +331,7 @@ function buildProject(spec: ProjectSpec = {}): Uint8Array {
     // bytes that would decompress to nonsense if anyone tried.
     const cache = new Uint8Array(offset).fill(0xcc);
     const source = compress(new TextEncoder().encode(module.source));
+    if (module.omitStream === true) continue;
     const stream = spec.moduleData?.(module, source) ?? Uint8Array.from([...cache, ...source]);
     vbaChildren.push({ name: module.streamName ?? module.name, data: stream });
   }
@@ -734,7 +735,7 @@ describe('parseVbaProject: malformed input', () => {
   });
 
   it('stops early and warns when the dir stream is truncated mid-record', () => {
-    const project = parseVbaProject(buildProject({ modules: [HELLO], truncateDir: 30 }));
+    const project = parseVbaProject(buildProject({ modules: [HELLO], truncateDir: 25 }));
     expect(project.warnings.join(' ')).toContain('stopped early');
     expect(project.modules).toEqual([]);
   });
@@ -755,11 +756,17 @@ describe('parseVbaProject: malformed input', () => {
     expect(project.warnings.join(' ')).toContain('declared count');
   });
 
-  it('warns when a module stream is missing', () => {
+  it('warns when a module stream is missing altogether', () => {
+    const project = parseVbaProject(buildProject({ modules: [{ ...HELLO, omitStream: true }] }));
+    expect(project.warnings.join(' ')).toContain("no stream named 'Module1'");
+    expect(project.modules[0]!.source).toBe('');
+  });
+
+  it('warns when a module stream is present but empty', () => {
     const project = parseVbaProject(
       buildProject({ modules: [HELLO], moduleData: () => new Uint8Array(0) }),
     );
-    expect(project.warnings.join(' ')).toMatch(/no stream named|not decompressible/);
+    expect(project.warnings.join(' ')).toContain('past the end');
     expect(project.modules[0]!.source).toBe('');
   });
 

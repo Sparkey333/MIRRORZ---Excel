@@ -34,6 +34,7 @@
 import {
   MAX_COLS,
   MAX_ROWS,
+  PHANTOM_LEAP_SERIAL,
   Workbook,
   type CellStyle,
   type DateSystem,
@@ -763,7 +764,7 @@ function parseDateLike(s: string, options: CsvInferenceOptions): InferredValue |
   if (parts.length > 2) return undefined;
 
   if (options.inferDates ?? true) {
-    const date = parseDatePart(datePart, options.dateOrder);
+    const date = parseDatePart(datePart, options.dateOrder, system);
     if (date) {
       const time = timePart === undefined ? undefined : parseTimePart(timePart);
       if (timePart !== undefined && !time) return undefined;
@@ -808,6 +809,12 @@ function dateToSerial(
   s: number,
   system: DateSystem,
 ): number {
+  // 29 February 1900 is a day that never happened and a serial that certainly
+  // exists: Excel inherited Lotus's leap-year bug and numbers it 60. It has no
+  // UTC instant to convert, so it is answered directly.
+  if (system === 1900 && y === 1900 && m === 2 && d === 29) {
+    return PHANTOM_LEAP_SERIAL + (h * 3600 + mi * 60 + s) / 86_400;
+  }
   let ms = Date.UTC(y, m - 1, d, h, mi, s);
   if (y >= 0 && y <= 99) {
     // Date.UTC reads a two-digit year as 19xx; undo that for a genuine one.
@@ -821,13 +828,14 @@ function dateToSerial(
 function parseDatePart(
   s: string,
   order: DateOrder | undefined,
+  system: DateSystem,
 ): { y: number; m: number; d: number } | undefined {
   const iso = ISO_DATE_RE.exec(s);
   if (iso) {
     const y = Number(iso[1]);
     const m = Number(iso[2]);
     const d = Number(iso[3]);
-    return validDate(y, m, d) ? { y, m, d } : undefined;
+    return validDate(y, m, d, system) ? { y, m, d } : undefined;
   }
   if (!order) return undefined;
 
@@ -842,7 +850,7 @@ function parseDatePart(
   if (y === undefined) return undefined;
   const m = Number(mRaw);
   const d = Number(dRaw);
-  return validDate(y, m, d) ? { y, m, d } : undefined;
+  return validDate(y, m, d, system) ? { y, m, d } : undefined;
 }
 
 /** Two-digit years follow Excel: 00-29 are 2000s, 30-99 are 1900s. */
@@ -853,8 +861,12 @@ function expandYear(raw: string): number | undefined {
   return n <= 29 ? 2000 + n : 1900 + n;
 }
 
-function validDate(y: number, m: number, d: number): boolean {
+function validDate(y: number, m: number, d: number, system: DateSystem): boolean {
   if (m < 1 || m > 12 || d < 1) return false;
+  // The one date Excel's calendar has and the real one does not. A file that
+  // contains it was written by a spreadsheet, so reading it back as text would
+  // lose a value the rest of this codebase carries as serial 60.
+  if (system === 1900 && y === 1900 && m === 2 && d === 29) return true;
   return d <= daysInMonth(y, m);
 }
 
@@ -1098,10 +1110,18 @@ export function writeCsv(sheet: Sheet, options: CsvWriteOptions = {}): string {
     (used ? { minRow: 0, minCol: 0, maxRow: used.maxRow, maxCol: used.maxCol } : undefined);
   if (!bounds) return options.bom ? '\uFEFF' : '';
 
+  // Clamped to the sheet's own limits: a cell address is packed as
+  // row * MAX_COLS + col, so a column past XFD aliases the next row and would
+  // quietly emit a different row's data into this one.
+  const firstRow = Math.max(0, bounds.minRow);
+  const firstCol = Math.max(0, bounds.minCol);
+  const lastRow = Math.min(bounds.maxRow, MAX_ROWS - 1);
+  const lastCol = Math.min(bounds.maxCol, MAX_COLS - 1);
+
   const rows: string[][] = [];
-  for (let r = Math.max(0, bounds.minRow); r <= bounds.maxRow; r++) {
+  for (let r = firstRow; r <= lastRow; r++) {
     const row: string[] = [];
-    for (let c = Math.max(0, bounds.minCol); c <= bounds.maxCol; c++) {
+    for (let c = firstCol; c <= lastCol; c++) {
       const cell = sheet.getCell(r, c);
       const value: Scalar = cell?.value ?? null;
       const style: CellStyle = styles ? styles.get(sheet.getStyle(r, c)) : {};

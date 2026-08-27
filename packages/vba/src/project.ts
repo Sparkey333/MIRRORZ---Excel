@@ -248,6 +248,10 @@ function decodeCp1252(bytes: Uint8Array): string {
  * the code stays readable even when a comment in Cyrillic does not.
  */
 function decodeText(bytes: Uint8Array, codePage: number, warnings: string[]): string {
+  // The same complaint would otherwise arrive once per string in the project.
+  const warnOnce = (message: string): void => {
+    if (!warnings.includes(message)) warnings.push(message);
+  };
   if (bytes.length === 0) return '';
   if (codePage === 1252 || codePage === 0) return decodeCp1252(bytes);
   if (codePage === 65001) return new TextDecoder('utf-8').decode(bytes);
@@ -256,11 +260,11 @@ function decodeText(bytes: Uint8Array, codePage: number, warnings: string[]): st
     try {
       return new TextDecoder(label).decode(bytes);
     } catch {
-      warnings.push(`code page ${codePage} is unavailable on this platform; decoded as windows-1252`);
+      warnOnce(`code page ${codePage} is unavailable on this platform; decoded as windows-1252`);
       return decodeCp1252(bytes);
     }
   }
-  warnings.push(`code page ${codePage} is not implemented; decoded as windows-1252`);
+  warnOnce(`code page ${codePage} is not implemented; decoded as windows-1252`);
   return decodeCp1252(bytes);
 }
 
@@ -331,6 +335,34 @@ interface DirModule {
   isPrivate: boolean;
 }
 
+/** A reference's records as read, before the code page is known. */
+interface RawReference {
+  kind: VbaReferenceKind;
+  name?: Uint8Array;
+  libid?: Uint8Array;
+  libidRelative?: Uint8Array;
+  majorVersion?: number;
+  minorVersion?: number;
+}
+
+/**
+ * A module's records as read. Text stays as bytes until the whole stream has
+ * been walked, because PROJECTCODEPAGE is not guaranteed to have been seen by
+ * the time the first string turns up.
+ */
+interface RawModule {
+  name?: Uint8Array;
+  nameUnicode?: Uint8Array;
+  streamName?: Uint8Array;
+  docString?: Uint8Array;
+  type: VbaModuleType;
+  offset: number;
+  helpContext: number;
+  cookie: number;
+  readOnly: boolean;
+  isPrivate: boolean;
+}
+
 interface DirStream {
   sysKind: number;
   lcid: number;
@@ -389,8 +421,8 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
     references: [],
     modules: [],
   };
-  const rawReferences: Array<{ kind: VbaReferenceKind; name?: Uint8Array; libid?: Uint8Array; libidRelative?: Uint8Array; majorVersion?: number; minorVersion?: number }> = [];
-  const rawModules: Array<Record<string, unknown>> = [];
+  const rawReferences: RawReference[] = [];
+  const rawModules: RawModule[] = [];
 
   let pendingReferenceName: Uint8Array | undefined;
   let moduleCount = 0;
@@ -516,7 +548,7 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
     modules: while (cursor.remaining >= 2) {
       const first = cursor.peek16();
       if (first === ID_DIR_TERMINATOR || first === undefined) break;
-      const module: Record<string, unknown> = {
+      const module: RawModule = {
         type: 'procedural',
         offset: 0,
         helpContext: 0,
@@ -533,44 +565,44 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
         }
         switch (id) {
           case ID_MODULENAME:
-            module['name'] = readSizedBytes(cursor);
+            module.name = readSizedBytes(cursor);
             break;
           case ID_MODULENAMEUNICODE:
-            module['nameUnicode'] = readSizedBytes(cursor);
+            module.nameUnicode = readSizedBytes(cursor);
             break;
           case ID_MODULESTREAMNAME:
-            module['streamName'] = readMbcsPair(cursor);
+            module.streamName = readMbcsPair(cursor);
             break;
           case ID_MODULEDOCSTRING:
-            module['docString'] = readMbcsPair(cursor);
+            module.docString = readMbcsPair(cursor);
             break;
           case ID_MODULEOFFSET:
             cursor.u32();
-            module['offset'] = cursor.u32();
+            module.offset = cursor.u32();
             break;
           case ID_MODULEHELPCONTEXT:
             cursor.u32();
-            module['helpContext'] = cursor.u32();
+            module.helpContext = cursor.u32();
             break;
           case ID_MODULECOOKIE:
             cursor.u32();
-            module['cookie'] = cursor.u16();
+            module.cookie = cursor.u16();
             break;
           case ID_MODULETYPE_PROCEDURAL:
             cursor.u32();
-            module['type'] = 'procedural';
+            module.type = 'procedural';
             break;
           case ID_MODULETYPE_DOCUMENT:
             cursor.u32();
-            module['type'] = 'document';
+            module.type = 'document';
             break;
           case ID_MODULEREADONLY:
             cursor.u32();
-            module['readOnly'] = true;
+            module.readOnly = true;
             break;
           case ID_MODULEPRIVATE:
             cursor.u32();
-            module['isPrivate'] = true;
+            module.isPrivate = true;
             break;
           default:
             warnings.push(`dir: skipped unknown module record 0x${id.toString(16).padStart(4, '0')}`);
@@ -611,20 +643,20 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
     return mapped;
   });
   result.modules = rawModules.map((module) => {
-    const name = text(module['name'] as Uint8Array | undefined);
-    const streamName = text(module['streamName'] as Uint8Array | undefined);
+    const name = text(module.name);
+    const streamName = text(module.streamName);
     return {
       name,
       // MODULENAMEUNICODE is UTF-16LE regardless of the project code page.
-      nameUnicode: decodeUtf16(module['nameUnicode'] as Uint8Array | undefined),
+      nameUnicode: decodeUtf16(module.nameUnicode),
       streamName: streamName === '' ? name : streamName,
-      type: module['type'] as VbaModuleType,
-      offset: module['offset'] as number,
-      docString: text(module['docString'] as Uint8Array | undefined),
-      helpContext: module['helpContext'] as number,
-      cookie: module['cookie'] as number,
-      readOnly: module['readOnly'] as boolean,
-      isPrivate: module['isPrivate'] as boolean,
+      type: module.type,
+      offset: module.offset,
+      docString: text(module.docString),
+      helpContext: module.helpContext,
+      cookie: module.cookie,
+      readOnly: module.readOnly,
+      isPrivate: module.isPrivate,
     };
   });
 

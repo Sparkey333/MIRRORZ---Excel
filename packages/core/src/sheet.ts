@@ -26,6 +26,17 @@ import type { CellValue, Scalar } from './types.js';
 export interface CellData {
   /** The literal value, or the last computed value when `formula` is set. */
   value: Scalar;
+  /**
+   * The text the user actually typed or pasted, kept when it cannot be
+   * reconstructed from `value` alone.
+   *
+   * This is what makes type inference reversible rather than destructive: a
+   * cell that was entered as `007` or `1-2` can be shown, exported and reverted
+   * exactly as supplied, instead of the original being lost the moment it was
+   * interpreted. xlsx has no slot for it, so on save it goes to a MIRRORZ-owned
+   * part that Excel ignores.
+   */
+  literal?: string;
   /** Formula source without the leading `=`, when this is a formula cell. */
   formula?: string;
   /** Style id, indexing the workbook's StyleTable. */

@@ -13,10 +13,12 @@
 
 import { FunctionRegistry, type FunctionSpec } from '../registry.js';
 
+import { MATH_FUNCTIONS } from './math.js';
 // --- category imports go here ---
 
 /** Every implemented function, in registration order. */
 export const ALL_FUNCTIONS: readonly FunctionSpec[] = [
+  ...MATH_FUNCTIONS,
   // --- category arrays go here ---
 ];
 

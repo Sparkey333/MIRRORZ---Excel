@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CellError, Workbook, partsToSerial } from '../../core/src/index.js';
+import { CellError, MAX_COLS, Workbook, partsToSerial } from '../../core/src/index.js';
 import {
   CsvRowParser,
   decodeCsvBytes,
@@ -354,6 +354,18 @@ describe('encoding', () => {
     expect([...text.slice(0x80, 0xa0)].map((c) => c.codePointAt(0))).toEqual(high);
   });
 
+  it('decodes a buffer past the chunking threshold', () => {
+    // Built one chunk at a time, so a file bigger than the argument limit does
+    // not turn into a RangeError from String.fromCharCode.
+    const pattern = [0x41, 0x80, 0xe9, 0x9d, 0xff];
+    const bytes = new Uint8Array(200_000);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = pattern[i % pattern.length]!;
+    const text = decodeCsvBytes(bytes, 'windows-1252').text;
+    expect(text).toHaveLength(bytes.length);
+    expect(text.slice(0, 5)).toBe('A\u20ac\u00e9\u009d\u00ff');
+    expect(text.slice(-5)).toBe('A\u20ac\u00e9\u009d\u00ff');
+  });
+
   it('agrees with the platform decoder where the platform has one', () => {
     let expected: string | undefined;
     try {
@@ -646,6 +658,23 @@ describe('date inference', () => {
     expect(val('2023-02-30')).toBe('2023-02-30');
     expect(val('2023-13-01')).toBe('2023-13-01');
     expect(val('2023-00-10')).toBe('2023-00-10');
+  });
+
+  it('accepts the phantom 29 February 1900 that Excel carries', () => {
+    // Excel inherited Lotus 1-2-3's belief that 1900 was a leap year, so serial
+    // 60 is a date that never happened. Files written by Excel contain it, and
+    // core renders serial 60 as 1900-02-29, so refusing it on the way in would
+    // lose the value on a round trip.
+    expect(val('1900-02-29')).toBe(60);
+    expect(fmt('1900-02-29')).toBe('yyyy-mm-dd');
+    expect(val('1900-02-28')).toBe(59);
+    expect(val('1900-03-01')).toBe(61);
+    expect(val('02/29/1900', { dateOrder: 'mdy' })).toBe(60);
+    // Only the 1900 calendar has the bug, and 1900 predates the 1904 epoch.
+    expect(val('1900-02-29', { dateSystem: 1904 })).toBe('1900-02-29');
+    // No other February gains a 29th.
+    expect(val('1901-02-29')).toBe('1901-02-29');
+    expect(val('2100-02-29')).toBe('2100-02-29');
   });
 
   it('honours leap years', () => {
@@ -1092,6 +1121,21 @@ describe('writing a sheet', () => {
     expect(writeCsv(sheet, { ...opts, range: { minRow: 0, minCol: 1, maxRow: 1, maxCol: 2 } })).toBe(
       'b,c\ne,f\n',
     );
+  });
+
+  it('clamps a range to the sheet limits instead of aliasing', () => {
+    // Addresses pack as row * MAX_COLS + col, so a column past the last one is
+    // the next row's territory: an over-wide range must stop, not wrap.
+    const wb = new Workbook();
+    const sheet = wb.addSheet('S');
+    sheet.setValue(0, 0, 'a');
+    sheet.setValue(1, 3, 'next row');
+    const text = writeCsv(sheet, {
+      ...opts,
+      range: { minRow: 0, minCol: 0, maxRow: 0, maxCol: MAX_COLS + 5 },
+    });
+    expect(text).not.toContain('next row');
+    expect(text.split('\n')[0]!.split(',')).toHaveLength(MAX_COLS);
   });
 
   it('uses a formatter callback when one is given', () => {
