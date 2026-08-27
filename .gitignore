@@ -12,3 +12,4 @@ coverage/
 fixtures/generated/
 .vite/
 .turbo/
+scratch-tmp/
