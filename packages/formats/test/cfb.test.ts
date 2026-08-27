@@ -491,7 +491,11 @@ describe('synthetic containers', () => {
   });
 
   it('reports a storage as zero-length with no data', () => {
-    const cfb = readCfb(buildNested().bytes);
+    const built = buildNested();
+    // MS-CFB fixes a storage's stream size at zero. Whatever the field holds,
+    // data() can only ever return nothing, so size has to agree with it.
+    built.view.setUint32(built.dirEntryOffset(1) + 120, 0x7fff_ffff, true);
+    const cfb = readCfb(built.bytes);
     const vba = cfb.entries.get('VBA')!;
     expect(vba.size).toBe(0);
     expect(vba.data()).toEqual(new Uint8Array(0));
@@ -681,19 +685,35 @@ describe('rejecting malformed input', () => {
     expect(() => readCfb(built.bytes).read('large')).toThrow(/supplies only/);
   });
 
-  // The padding stream only exists to make the file comfortably larger than the
-  // bogus sizes below, so that the mini-stream guards are what fires and not the
-  // cheaper "bigger than the whole file" check.
+  // 'small' occupies mini sectors 0-7; 'other' takes the mini stream up to
+  // 3520 bytes so that a bogus size for 'small' can stay inside what the mini
+  // stream holds, and 'pad' keeps the file comfortably larger than any of the
+  // bogus sizes. Without that headroom every case below would land on whichever
+  // guard happens to fire first rather than on the one it names.
   const miniCase = () =>
     buildCfb([
       { name: 'small', data: bytes(500) },
+      { name: 'other', data: bytes(3000, 2) },
       { name: 'pad', data: bytes(20_000, 4) },
     ]);
 
   it('rejects a mini stream chain that ends early', () => {
     const built = miniCase();
+    // 1000 bytes fits inside the mini stream, but not inside this stream's own
+    // eight-sector chain, which terminates after 512.
+    built.view.setUint32(built.dirEntryOffset(1) + 120, 1000, true);
+    expect(() => readCfb(built.bytes).read('small')).toThrow(/its chain ends after 512/);
+  });
+
+  it('rejects a mini stream longer than the whole mini stream', () => {
+    const built = miniCase();
+    // Below the cutoff, so it still takes the mini path, and well inside the
+    // file, so the cheaper whole-file check cannot be what fires - but larger
+    // than the 3520 bytes the mini stream actually holds.
     built.view.setUint32(built.dirEntryOffset(1) + 120, 4000, true);
-    expect(() => readCfb(built.bytes).read('small')).toThrow(/its chain ends after/);
+    expect(() => readCfb(built.bytes).read('small')).toThrow(
+      /the whole mini stream holds only 3520/,
+    );
   });
 
   it('rejects a mini sector past the end of the mini stream', () => {
@@ -705,11 +725,49 @@ describe('rejecting malformed input', () => {
   it('rejects a circular mini FAT chain', () => {
     const built = miniCase();
     const miniFatSector = readCfb(built.bytes).header.firstMiniFatSector;
-    // Every mini sector points at itself, so the chain never advances past the
-    // declared length.
+    // Every mini sector points at itself. A mini chain stops when the declared
+    // size is satisfied rather than when it runs out of links, so a cycle does
+    // not lengthen the walk - it silently repeats one 64-byte sector. The
+    // declared size here stays within what the mini stream holds, so only a
+    // real cycle check can catch it.
     for (let i = 0; i < 8; i++) built.view.setUint32(built.offsetOf(miniFatSector) + i * 4, i, true);
-    built.view.setUint32(built.dirEntryOffset(1) + 120, 4000, true);
+    built.view.setUint32(built.dirEntryOffset(1) + 120, 1000, true);
     expect(() => readCfb(built.bytes).read('small')).toThrow(/circular mini FAT/);
+  });
+
+  it('rejects a mini stream cutoff other than 4096', () => {
+    // The cutoff decides which allocator every stream is read from, so a wrong
+    // value returns another stream's bytes rather than failing.
+    expect(() => readCfb(corrupt((b) => b.view.setUint32(56, 0, true)))).toThrow(
+      /invalid mini stream cutoff 0/,
+    );
+    expect(() => readCfb(corrupt((b) => b.view.setUint32(56, 512, true)))).toThrow(
+      /invalid mini stream cutoff 512/,
+    );
+  });
+
+  it('rejects a version 4 stream whose size needs more than 32 bits', () => {
+    // MS-CFB only licenses ignoring the high half for version 3 files. Dropping
+    // it here would turn a stream claiming 4 GiB + 100 bytes into a 100-byte
+    // read, which is a wrong answer rather than an error.
+    const built = buildCfb([{ name: 'a', data: bytes(100) }], { major: 4 });
+    built.view.setUint32(built.dirEntryOffset(1) + 124, 1, true);
+    expect(() => readCfb(built.bytes)).toThrow(/above the \d+-byte limit/);
+  });
+
+  it('keeps ignoring the high half of the size in a version 3 file', () => {
+    // Older writers left those bits uninitialised and the specification
+    // recommends treating them as zero for version 3.
+    const built = buildCfb([{ name: 'a', data: bytes(100) }]);
+    built.view.setUint32(built.dirEntryOffset(1) + 124, 0xdead_beef, true);
+    expect(readCfb(built.bytes).read('a')).toEqual(bytes(100));
+  });
+
+  it('rejects a zero name length on a live entry', () => {
+    // The length counts the mandatory terminating null, so it cannot be zero.
+    expect(() => readCfb(corrupt((b) => b.view.setUint16(b.dirEntryOffset(1) + 64, 0, true)))).toThrow(
+      /invalid name length of 0/,
+    );
   });
 
   it('rejects a first directory entry that is not the root', () => {

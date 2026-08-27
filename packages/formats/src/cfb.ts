@@ -150,7 +150,7 @@ export function readCfb(buf: Uint8Array, options: CfbReadOptions = {}): CfbFile 
   const fat = readFat(view, header, sectorCount);
   const dirSectors = followChain(fat, header.firstDirectorySector, sectorCount, 'directory');
   const directory = gatherSectors(buf, dirSectors, sectorSize, dirSectors.length * sectorSize);
-  const raws = parseDirectory(directory, buf.length, maxStreamSize);
+  const raws = parseDirectory(directory, buf.length, maxStreamSize, header.majorVersion);
   if (raws.length === 0) throw new CfbError('compound file has an empty directory');
   const rootRaw = raws[0]!;
   if (rootRaw.type !== OBJ_ROOT) {
@@ -234,6 +234,17 @@ function parseHeader(buf: Uint8Array, view: DataView): CfbHeader {
   if (buf.length < sectorSize * 2) {
     throw new CfbError(`file is ${buf.length} bytes, too short to hold a header and one sector`);
   }
+  // MS-CFB 2.2 fixes this field at 0x00001000, and it is not decorative: it
+  // decides, for every stream in the file, whether that stream is read from the
+  // FAT or from the mini FAT. A wrong value does not fail loudly, it silently
+  // routes reads through the wrong allocator and returns some other stream's
+  // bytes, so it has to be checked rather than trusted.
+  const miniStreamCutoff = view.getUint32(56, true);
+  if (miniStreamCutoff !== 0x1000) {
+    throw new CfbError(
+      `invalid mini stream cutoff ${miniStreamCutoff}; the format fixes it at 4096`,
+    );
+  }
   return {
     minorVersion: view.getUint16(24, true),
     majorVersion,
@@ -243,7 +254,7 @@ function parseHeader(buf: Uint8Array, view: DataView): CfbHeader {
     fatSectorCount: view.getUint32(44, true),
     firstDirectorySector: view.getUint32(48, true),
     transactionSignature: view.getUint32(52, true),
-    miniStreamCutoff: view.getUint32(56, true),
+    miniStreamCutoff,
     firstMiniFatSector: view.getUint32(60, true),
     miniFatSectorCount: view.getUint32(64, true),
     firstDifatSector: view.getUint32(68, true),
@@ -300,12 +311,20 @@ function readFat(view: DataView, header: CfbHeader, sectorCount: number): Uint32
     next = view.getUint32(base + perDifatSector * 4, true);
   }
 
+  // The FAT is indexed by sector number, so entries past the last sector the
+  // file actually has can never be reached. Clamping keeps the allocation
+  // proportional to the file instead of to the number of FAT sectors the DIFAT
+  // claims: 109 header slots all naming one sector would otherwise turn an 8 KB
+  // version 4 file into a 446 KB table of repeated garbage.
   const entriesPerSector = sectorSize / 4;
-  const fat = new Uint32Array(fatSectors.length * entriesPerSector);
+  const fat = new Uint32Array(Math.min(fatSectors.length * entriesPerSector, sectorCount));
   let p = 0;
   for (const sector of fatSectors) {
+    if (p >= fat.length) break;
     const base = sectorOffset(sector, sectorSize);
-    for (let i = 0; i < entriesPerSector; i++) fat[p++] = view.getUint32(base + i * 4, true);
+    for (let i = 0; i < entriesPerSector && p < fat.length; i++) {
+      fat[p++] = view.getUint32(base + i * 4, true);
+    }
   }
   return fat;
 }
@@ -392,11 +411,24 @@ function readFatStream(
 }
 
 function readMiniStream(mini: Uint8Array, miniFat: Uint32Array, raw: RawEntry): Uint8Array {
-  const out = new Uint8Array(raw.size);
   const capacity = Math.floor(mini.length / MINI_SECTOR_SIZE);
+  // Check what the mini stream can supply before allocating, so a bogus size
+  // in the directory cannot become a large Uint8Array we then throw away. The
+  // FAT path gets the same treatment inside gatherSectors.
+  if (raw.size > capacity * MINI_SECTOR_SIZE) {
+    throw new CfbError(
+      `mini stream ${raw.name} declares ${raw.size} bytes but the whole mini stream holds only ${capacity * MINI_SECTOR_SIZE}`,
+    );
+  }
+  const out = new Uint8Array(raw.size);
+  // A mini chain ends when the declared size is satisfied, not when it runs out
+  // of links, so a cycle would not lengthen the walk - it would quietly repeat
+  // one 64-byte sector for the whole stream. Detecting it needs a real visited
+  // set, which costs one byte per mini sector and is bounded by the mini
+  // stream we already hold.
+  const visited = new Uint8Array(capacity);
   let sector = raw.startSector;
   let p = 0;
-  let steps = 0;
   while (p < raw.size) {
     if (sector === ENDOFCHAIN || sector === FREESECT) {
       throw new CfbError(
@@ -411,9 +443,10 @@ function readMiniStream(mini: Uint8Array, miniFat: Uint32Array, raw: RawEntry): 
         `mini sector ${sector} of ${raw.name} is past the end of the mini stream`,
       );
     }
-    if (++steps > capacity) {
+    if (visited[sector] === 1) {
       throw new CfbError(`mini chain for ${raw.name} does not terminate (circular mini FAT?)`);
     }
+    visited[sector] = 1;
     const start = sector * MINI_SECTOR_SIZE;
     const n = Math.min(MINI_SECTOR_SIZE, raw.size - p);
     out.set(mini.subarray(start, start + n), p);
@@ -449,7 +482,12 @@ interface RawEntry {
 
 const utf16Decoder = new TextDecoder('utf-16le');
 
-function parseDirectory(dir: Uint8Array, fileLength: number, maxStreamSize: number): RawEntry[] {
+function parseDirectory(
+  dir: Uint8Array,
+  fileLength: number,
+  maxStreamSize: number,
+  majorVersion: number,
+): RawEntry[] {
   const view = new DataView(dir.buffer, dir.byteOffset, dir.byteLength);
   const count = Math.floor(dir.length / DIR_ENTRY_SIZE);
   const out: RawEntry[] = [];
@@ -463,7 +501,9 @@ function parseDirectory(dir: Uint8Array, fileLength: number, maxStreamSize: numb
     if (type !== OBJ_STORAGE && type !== OBJ_STREAM && type !== OBJ_ROOT) type = OBJ_UNALLOCATED;
 
     const nameLength = view.getUint16(o + 64, true);
-    if (nameLength > 64 || nameLength % 2 !== 0) {
+    // The length counts the mandatory terminating null, so an allocated entry
+    // cannot declare fewer than two bytes; zero means the name is not there.
+    if (nameLength > 64 || nameLength % 2 !== 0 || (nameLength < 2 && type !== OBJ_UNALLOCATED)) {
       if (type === OBJ_UNALLOCATED) {
         out.push(unallocated());
         continue;
@@ -476,7 +516,9 @@ function parseDirectory(dir: Uint8Array, fileLength: number, maxStreamSize: numb
     const nameBytes = nameLength >= 2 ? dir.subarray(o, o + nameLength - 2) : dir.subarray(o, o);
     const name = trimAtNull(utf16Decoder.decode(nameBytes));
 
-    const size = readStreamSize(view, o + 120);
+    // MS-CFB 2.6.1: a storage object's stream size MUST be zero. Reporting the
+    // raw field would hand callers a length that data() can never return.
+    const size = type === OBJ_STORAGE ? 0 : readStreamSize(view, o + 120, majorVersion);
     if (type !== OBJ_UNALLOCATED && type !== OBJ_STORAGE) {
       if (size > maxStreamSize) {
         throw new CfbError(
@@ -524,15 +566,21 @@ function unallocated(): RawEntry {
 }
 
 /**
- * Read the 64-bit stream size, ignoring the high half.
+ * Read the 64-bit stream size.
  *
- * A version 3 stream cannot exceed 2 GB, and MS-CFB warns that older writers
- * left the top 32 bits uninitialised, so it explicitly recommends parsers treat
- * them as zero. Version 4 files in the wild are all well under 4 GB too, and
- * masking uniformly keeps the size inside a safe integer.
+ * A version 3 stream cannot exceed 2 GB, so its top 32 bits MUST be zero; MS-CFB
+ * 2.6.1 warns that older writers left them uninitialised anyway and explicitly
+ * recommends parsers ignore them - but that licence is granted for version 3
+ * only. Dropping the high half unconditionally would silently turn a version 4
+ * stream declaring 4 GiB + 100 bytes into a 100-byte read, which is a wrong
+ * answer rather than an error. Keep it for version 4 and let the maxStreamSize
+ * and file-length guards refuse what we cannot serve.
  */
-function readStreamSize(view: DataView, offset: number): number {
-  return view.getUint32(offset, true);
+function readStreamSize(view: DataView, offset: number, majorVersion: number): number {
+  const low = view.getUint32(offset, true);
+  const high = view.getUint32(offset + 4, true);
+  if (high === 0 || majorVersion === 3) return low;
+  return high * 0x1_0000_0000 + low;
 }
 
 function trimAtNull(name: string): string {

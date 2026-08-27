@@ -3,8 +3,10 @@
  *
  * Five decisions shape this file.
  *
- * First, references stay references. INDEX, OFFSET, INDIRECT and CHOOSE all
- * take ArgKind.Reference and hand a RefValue back where Excel does, because
+ * First, references stay references. INDEX, OFFSET and INDIRECT take
+ * ArgKind.Reference and hand a RefValue back where Excel does, and CHOOSE
+ * returns its chosen argument unaltered (it takes thunks, because Microsoft
+ * documents that an unselected value is not evaluated), because
  * `A1:INDEX(B1:B9,3)` and `SUM(OFFSET(A1,1,1,3,3))` are ordinary formulas: the
  * result is used as a range operand, not as a value. Dereferencing at the
  * function boundary would turn both into #VALUE!. ROW, COLUMN, ROWS, COLUMNS
@@ -564,16 +566,20 @@ const INDEX: FunctionSpec = {
 
 const CHOOSE: FunctionSpec = {
   name: 'CHOOSE',
-  params: [p.scalar('index_num'), p.ref('value1'), p.rest('values', ArgKind.Reference)],
+  params: [p.scalar('index_num'), p.lazy('value1'), p.rest('values', ArgKind.Lazy)],
   summary: 'Chooses a value from a list of values.',
   impl: (args, ctx) => {
     const index = intOf(args[0], ctx, 0);
     if (isError(index)) return index;
     const choices = args.length - 1;
     if (index < 1 || index > choices) return CellError.VALUE;
-    // The chosen argument is returned untouched, so a reference stays a
-    // reference and `SUM(A1:CHOOSE(2,B9,C9))` still names a range.
-    return args[index] as Value;
+    const chosen = args[index];
+    if (!isThunk(chosen)) return CellError.VALUE;
+    // Only the chosen argument is evaluated, which is why an error or a slow
+    // expression in an unselected branch costs nothing, and the result is
+    // returned untouched so a reference stays a reference: `A1:CHOOSE(2,B9,C9)`
+    // still names a range.
+    return ctx.force(chosen);
   },
 };
 
@@ -772,12 +778,10 @@ const ADDRESS: FunctionSpec = {
     if (a1) {
       address = `${colAbs ? '$' : ''}${colToName(col - 1)}${rowAbs ? '$' : ''}${row}`;
     } else {
-      // R1C1 offsets are relative to the calling cell, and a zero offset is
-      // written as a bare R or C rather than R[0].
-      const offset = (n: number): string => (n === 0 ? '' : `[${n}]`);
-      const r = rowAbs ? String(row) : offset(row - (ctx.origin.row + 1));
-      const c = colAbs ? String(col) : offset(col - (ctx.origin.col + 1));
-      address = `R${r}C${c}`;
+      // The relative form brackets the number given rather than an offset from
+      // the calling cell: ADDRESS(2,3,2,FALSE) is R2C[3] wherever it sits, which
+      // is what Microsoft's own example documents.
+      address = `R${rowAbs ? row : `[${row}]`}C${colAbs ? col : `[${col}]`}`;
     }
 
     const sheet = args[4] === undefined ? null : scalarOf(args[4], ctx);

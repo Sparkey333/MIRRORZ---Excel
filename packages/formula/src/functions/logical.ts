@@ -218,13 +218,14 @@ const SWITCH: FunctionSpec = {
   },
 };
 
-/** TRUE and FALSE counted across every argument, with Excel's two rules. */
 interface Tally {
+  /** Values that counted as logical at all. */
   seen: number;
   trues: number;
 }
 
-function tally(args: (Value | undefined)[], _ctx: FunctionContext): Tally | CellError {
+/** Count TRUEs across every argument, applying the range/argument asymmetry. */
+function tally(args: (Value | undefined)[]): Tally | CellError {
   let seen = 0;
   let trues = 0;
   for (const arg of args) {
@@ -258,8 +259,8 @@ const AND: FunctionSpec = {
   name: 'AND',
   params: [p.array('logical1'), p.rest('logical')],
   summary: 'TRUE when every argument is TRUE.',
-  impl: (args, ctx) => {
-    const t = tally(args, ctx);
+  impl: (args) => {
+    const t = tally(args);
     return isError(t) ? t : t.trues === t.seen;
   },
 };
@@ -268,8 +269,8 @@ const OR: FunctionSpec = {
   name: 'OR',
   params: [p.array('logical1'), p.rest('logical')],
   summary: 'TRUE when any argument is TRUE.',
-  impl: (args, ctx) => {
-    const t = tally(args, ctx);
+  impl: (args) => {
+    const t = tally(args);
     return isError(t) ? t : t.trues > 0;
   },
 };
@@ -278,8 +279,8 @@ const XOR: FunctionSpec = {
   name: 'XOR',
   params: [p.array('logical1'), p.rest('logical')],
   summary: 'TRUE when an odd number of arguments are TRUE.',
-  impl: (args, ctx) => {
-    const t = tally(args, ctx);
+  impl: (args) => {
+    const t = tally(args);
     return isError(t) ? t : t.trues % 2 === 1;
   },
 };
