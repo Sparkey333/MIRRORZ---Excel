@@ -289,6 +289,12 @@ export class OpcPackage {
     if (!this.parts.has(part)) this.order.push(part);
     this.parts.set(part, data);
     if (contentType) this.overrides.set(part, contentType);
+    // A relationship part is not just bytes: it is the index the rest of the
+    // package is resolved through. Storing one without parsing it leaves a
+    // package that looks complete but cannot find its own main document.
+    if (part.endsWith('.rels')) {
+      this.rels.set(relsSourcePart(part), parseRelationships(this.text(part)));
+    }
   }
 
   putText(part: string, xml: string, contentType?: string): void {
