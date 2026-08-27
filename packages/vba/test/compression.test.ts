@@ -234,6 +234,26 @@ describe('compress: framing', () => {
     expect(Array.from(decompress(compress(input)))).toEqual(Array.from(input));
   });
 
+  it('does not invent a byte when a copy token lands on the last byte of a chunk', () => {
+    // Regression. A chunk body is 4096 bytes at most. When the encoder reaches
+    // byte 4095 with a two byte copy token still to write there is no room for
+    // it, and the encoder used to abandon the chunk by setting its write cursor
+    // to 4096 - which left one byte of the body never written to but still
+    // inside the slice that was emitted. The decompressor read that untouched
+    // byte as a literal and handed back one NUL more than went in.
+    //
+    // The witness: near-incompressible bytes, so the tail overflows a chunk,
+    // with a single three byte match planted at exactly the input position
+    // where the encoder's output cursor sits on 4095.
+    const input = pseudoRandom(4095, 5);
+    input[3642] = input[0]!;
+    input[3643] = input[1]!;
+    input[3644] = input[2]!;
+    const round = decompress(compress(input));
+    expect(round.length).toBe(input.length);
+    expect(Array.from(round)).toEqual(Array.from(input));
+  });
+
   it('produces a smaller stream for repetitive input than for random input', () => {
     const repetitive = ascii('Sub Test()\n'.repeat(300));
     const random = pseudoRandom(repetitive.length, 19);

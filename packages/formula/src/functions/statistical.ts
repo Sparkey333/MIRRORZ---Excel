@@ -54,7 +54,6 @@ import {
   ArgKind,
   type FunctionContext,
   type FunctionSpec,
-  type ParamSpec,
   p,
 } from '../registry.js';
 import {
@@ -166,7 +165,9 @@ function collect(
         if (!out.error) out.error = v;
         continue;
       }
-      if (v !== null) out.nonEmpty++;
+      // A directly supplied argument always exists, even when it is the empty
+      // slot of `COUNTA(1,)`; a blank cell inside a range never reaches here.
+      if (v !== null || item.direct) out.nonEmpty++;
       if (item.direct) {
         const n = toNumber(v);
         if (isError(n)) {
@@ -515,20 +516,6 @@ function lnChoose(n: number, k: number): number {
   return lnFactorial(n) - lnFactorial(k) - lnFactorial(n - k);
 }
 
-/** C(n,k) as a number, exact for the sizes a spreadsheet actually uses. */
-function chooseFn(n: number, k: number): number {
-  if (k < 0 || k > n) return 0;
-  if (k === 0 || k === n) return 1;
-  const m = Math.min(k, n - k);
-  let acc = 1;
-  // The running quotient stays integral at every step, so no rounding creeps in
-  // until the true result exceeds 2^53.
-  for (let i = 1; i <= m; i++) acc = (acc * (n - m + i)) / i;
-  // The quotient is integral in exact arithmetic; snapping it back removes the
-  // last-bit dust while the true value is still representable.
-  return acc < 9007199254740992 ? Math.round(acc) : acc;
-}
-
 /**
  * Regularised lower incomplete gamma P(a,x) = gamma(a,x)/gamma(a).
  *
@@ -750,9 +737,9 @@ function invertCdf(
   lo: number,
   hi: number,
 ): number | CellError {
-  let a = lo;
-  let b = hi;
-  if (!Number.isFinite(b)) {
+  let a = Number.isFinite(lo) ? lo : -1;
+  let b = Number.isFinite(hi) ? hi : 1;
+  if (!Number.isFinite(hi)) {
     b = Math.max(1, Math.abs(a) * 2);
     let guard = 0;
     while (cdf(b) < target) {
@@ -760,7 +747,7 @@ function invertCdf(
       if (++guard > 2000 || b > 1e300) return CellError.NUM;
     }
   }
-  if (!Number.isFinite(a)) {
+  if (!Number.isFinite(lo)) {
     a = -Math.max(1, Math.abs(b) * 2);
     let guard = 0;
     while (cdf(a) > target) {
@@ -1522,3 +1509,1314 @@ function percentRankSpec(name: string, exclusive: boolean): FunctionSpec {
     },
   };
 }
+
+const DISPERSION: FunctionSpec[] = [
+  aggregate('STDEV.S', Mode.Numbers, 'Estimates standard deviation from a sample.', (n) =>
+    stdevOf(n, true),
+  ),
+  aggregate('STDEV.P', Mode.Numbers, 'Calculates standard deviation of a whole population.', (n) =>
+    stdevOf(n, false),
+  ),
+  aggregate(
+    'STDEVA',
+    Mode.Inclusive,
+    'Estimates standard deviation from a sample, counting text as zero.',
+    (n) => stdevOf(n, true),
+  ),
+  aggregate(
+    'STDEVPA',
+    Mode.Inclusive,
+    'Calculates population standard deviation, counting text as zero.',
+    (n) => stdevOf(n, false),
+  ),
+  aggregate('VAR.S', Mode.Numbers, 'Estimates variance from a sample.', (n) =>
+    varianceOf(n, true),
+  ),
+  aggregate('VAR.P', Mode.Numbers, 'Calculates variance of a whole population.', (n) =>
+    varianceOf(n, false),
+  ),
+  aggregate(
+    'VARA',
+    Mode.Inclusive,
+    'Estimates variance from a sample, counting text as zero.',
+    (n) => varianceOf(n, true),
+  ),
+  aggregate(
+    'VARPA',
+    Mode.Inclusive,
+    'Calculates population variance, counting text as zero.',
+    (n) => varianceOf(n, false),
+  ),
+  aggregate('DEVSQ', Mode.Numbers, 'Returns the sum of squares of deviations.', (nums) =>
+    nums.length === 0 ? CellError.NUM : finite(devsqOf(nums)),
+  ),
+  aggregate('AVEDEV', Mode.Numbers, 'Returns the average of absolute deviations.', (nums) => {
+    if (nums.length === 0) return CellError.NUM;
+    const mean = meanOf(nums);
+    let acc = 0;
+    for (const x of nums) acc = excelAdd(acc, Math.abs(excelSub(x, mean)));
+    return acc / nums.length;
+  }),
+  aggregate('GEOMEAN', Mode.Numbers, 'Returns the geometric mean.', (nums) => {
+    if (nums.length === 0) return CellError.NUM;
+    let logs = 0;
+    for (const x of nums) {
+      if (x <= 0) return CellError.NUM;
+      logs += Math.log(x);
+    }
+    // Summing logarithms rather than multiplying keeps a long column from
+    // overflowing on the way to a perfectly ordinary answer.
+    return finite(Math.exp(logs / nums.length));
+  }),
+  aggregate('HARMEAN', Mode.Numbers, 'Returns the harmonic mean.', (nums) => {
+    if (nums.length === 0) return CellError.NUM;
+    let acc = 0;
+    for (const x of nums) {
+      if (x <= 0) return CellError.NUM;
+      acc += 1 / x;
+    }
+    return finite(nums.length / acc);
+  }),
+  aggregate('SKEW', Mode.Numbers, 'Returns the skewness of a distribution.', (nums) => {
+    const n = nums.length;
+    if (n < 3) return CellError.DIV0;
+    const s = stdevOf(nums, true);
+    if (isError(s)) return s;
+    if (s === 0) return CellError.DIV0;
+    return (n / ((n - 1) * (n - 2))) * (centralMoment(nums, 3) / s ** 3);
+  }),
+  aggregate('SKEW.P', Mode.Numbers, 'Returns the skewness of a population.', (nums) => {
+    const n = nums.length;
+    if (n < 3) return CellError.DIV0;
+    const s = stdevOf(nums, false);
+    if (isError(s)) return s;
+    if (s === 0) return CellError.DIV0;
+    return centralMoment(nums, 3) / n / s ** 3;
+  }),
+  aggregate('KURT', Mode.Numbers, 'Returns the kurtosis of a data set.', (nums) => {
+    const n = nums.length;
+    if (n < 4) return CellError.DIV0;
+    const s = stdevOf(nums, true);
+    if (isError(s)) return s;
+    if (s === 0) return CellError.DIV0;
+    const scale = (n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3));
+    const correction = (3 * (n - 1) ** 2) / ((n - 2) * (n - 3));
+    return scale * (centralMoment(nums, 4) / s ** 4) - correction;
+  }),
+  {
+    name: 'TRIMMEAN',
+    params: [p.any('array'), p.scalar('percent')],
+    summary: 'Returns the mean of the interior of a data set.',
+    impl: (args, ctx) => {
+      const nums = numbersOf([args[0]], ctx);
+      if (isError(nums)) return nums;
+      const percent = numArg(args[1]);
+      if (isError(percent)) return percent;
+      if (percent < 0 || percent > 1) return CellError.NUM;
+      if (nums.length === 0) return CellError.NUM;
+      // Excel rounds the number of excluded points down to a multiple of two so
+      // that the same count comes off each end.
+      const excluded = Math.floor((nums.length * percent) / 2) * 2;
+      const perSide = excluded / 2;
+      const sorted = [...nums].sort((a, b) => a - b);
+      return averageOf(sorted.slice(perSide, sorted.length - perSide));
+    },
+  },
+  {
+    name: 'STANDARDIZE',
+    params: [p.scalar('x'), p.scalar('mean'), p.scalar('standard_dev')],
+    broadcast: true,
+    summary: 'Returns a normalized value.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const sd = numArg(args[2]);
+      if (isError(sd)) return sd;
+      if (sd <= 0) return CellError.NUM;
+      return finite(excelSub(x, mean) / sd);
+    },
+  },
+];
+
+const RELATIONSHIPS: FunctionSpec[] = [
+  covarianceSpec('COVARIANCE.P', false),
+  covarianceSpec('COVARIANCE.S', true),
+  correlationSpec('CORREL'),
+  correlationSpec('PEARSON'),
+  {
+    name: 'RSQ',
+    params: [p.array('known_ys'), p.array('known_xs')],
+    summary: 'Returns the square of the Pearson product moment correlation coefficient.',
+    impl: (args, ctx) => {
+      const pairs = pairsOf(block(args[1], ctx), block(args[0], ctx));
+      if (isError(pairs)) return pairs;
+      const m = momentsOf(pairs);
+      if (m.n < 2 || m.sxx === 0 || m.syy === 0) return CellError.DIV0;
+      const r = m.sxy / Math.sqrt(m.sxx * m.syy);
+      return r * r;
+    },
+  },
+  {
+    name: 'SLOPE',
+    params: [p.array('known_ys'), p.array('known_xs')],
+    summary: 'Returns the slope of the linear regression line.',
+    impl: (args, ctx) => {
+      const pairs = pairsOf(block(args[1], ctx), block(args[0], ctx));
+      if (isError(pairs)) return pairs;
+      const m = momentsOf(pairs);
+      if (m.n < 2 || m.sxx === 0) return CellError.DIV0;
+      return finite(m.sxy / m.sxx);
+    },
+  },
+  {
+    name: 'INTERCEPT',
+    params: [p.array('known_ys'), p.array('known_xs')],
+    summary: 'Returns the intercept of the linear regression line.',
+    impl: (args, ctx) => {
+      const pairs = pairsOf(block(args[1], ctx), block(args[0], ctx));
+      if (isError(pairs)) return pairs;
+      const m = momentsOf(pairs);
+      if (m.n < 2 || m.sxx === 0) return CellError.DIV0;
+      return finite(excelSub(m.meanY, (m.sxy / m.sxx) * m.meanX));
+    },
+  },
+  {
+    name: 'FORECAST.LINEAR',
+    params: [p.scalar('x'), p.array('known_ys'), p.array('known_xs')],
+    futureFunction: true,
+    summary: 'Returns a value along a linear trend.',
+    impl: (args, ctx) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const pairs = pairsOf(block(args[2], ctx), block(args[1], ctx));
+      if (isError(pairs)) return pairs;
+      const m = momentsOf(pairs);
+      if (m.n < 2 || m.sxx === 0) return CellError.DIV0;
+      const slope = m.sxy / m.sxx;
+      return finite(excelAdd(m.meanY, slope * excelSub(x, m.meanX)));
+    },
+  },
+];
+
+function covarianceSpec(name: string, sample: boolean): FunctionSpec {
+  return {
+    name,
+    params: [p.array('array1'), p.array('array2')],
+    summary: sample
+      ? 'Returns the sample covariance of two data sets.'
+      : 'Returns the population covariance of two data sets.',
+    impl: (args, ctx) => {
+      const pairs = pairsOf(block(args[0], ctx), block(args[1], ctx));
+      if (isError(pairs)) return pairs;
+      const m = momentsOf(pairs);
+      if (m.n < (sample ? 2 : 1)) return CellError.DIV0;
+      return finite(m.sxy / (sample ? m.n - 1 : m.n));
+    },
+  };
+}
+
+function correlationSpec(name: string): FunctionSpec {
+  return {
+    name,
+    params: [p.array('array1'), p.array('array2')],
+    summary: 'Returns the correlation coefficient between two data sets.',
+    impl: (args, ctx) => {
+      const pairs = pairsOf(block(args[0], ctx), block(args[1], ctx));
+      if (isError(pairs)) return pairs;
+      const m = momentsOf(pairs);
+      if (m.n < 2 || m.sxx === 0 || m.syy === 0) return CellError.DIV0;
+      return m.sxy / Math.sqrt(m.sxx * m.syy);
+    },
+  };
+}
+
+const REGRESSION: FunctionSpec[] = [
+  {
+    name: 'LINEST',
+    params: [
+      p.array('known_ys'),
+      p.array('known_xs', true),
+      p.scalar('const', true),
+      p.scalar('stats', true),
+    ],
+    summary: 'Returns the parameters of a linear trend.',
+    impl: (args, ctx) => {
+      const input = regressionInput(block(args[0], ctx), args[1] === undefined ? undefined : block(args[1], ctx));
+      if (isError(input)) return input;
+      const useConst = boolArg(args[2], true);
+      if (isError(useConst)) return useConst;
+      const wantStats = boolArg(args[3], false);
+      if (isError(wantStats)) return wantStats;
+      const reg = leastSquares(input.xs, input.y, useConst);
+      if (!reg) return CellError.NUM;
+
+      // Excel lays the coefficients out backwards: the last variable's slope
+      // comes first and the intercept last.
+      const width = reg.k + 1;
+      const row0: Scalar[] = [];
+      for (let j = reg.k; j >= 1; j--) row0.push(reg.coef[j]!);
+      row0.push(reg.coef[0]!);
+      if (!wantStats) return makeArray(1, width, row0);
+
+      const row1: Scalar[] = [];
+      for (let j = reg.k; j >= 1; j--) row1.push(reg.se[j]!);
+      // The intercept's standard error is #N/A when the intercept was forced to
+      // zero, since there is no estimate to put an error on.
+      row1.push(reg.useConst ? reg.se[0]! : CellError.NA);
+      const pad = (cells: Scalar[]): Scalar[] => {
+        const out = [...cells];
+        while (out.length < width) out.push(CellError.NA);
+        return out;
+      };
+      return makeArray(5, width, [
+        ...row0,
+        ...row1,
+        ...pad([reg.r2, reg.sey]),
+        ...pad([reg.f, reg.df]),
+        ...pad([reg.ssReg, reg.ssResid]),
+      ]);
+    },
+  },
+  {
+    name: 'TREND',
+    params: [
+      p.array('known_ys'),
+      p.array('known_xs', true),
+      p.array('new_xs', true),
+      p.scalar('const', true),
+    ],
+    summary: 'Returns values along a linear trend.',
+    impl: (args, ctx) => trendImpl(args, ctx, false),
+  },
+  {
+    name: 'GROWTH',
+    params: [
+      p.array('known_ys'),
+      p.array('known_xs', true),
+      p.array('new_xs', true),
+      p.scalar('const', true),
+    ],
+    summary: 'Returns values along an exponential trend.',
+    impl: (args, ctx) => trendImpl(args, ctx, true),
+  },
+];
+
+/**
+ * TREND and GROWTH are the same fit; GROWTH runs it on the logarithms of the
+ * observed y values and exponentiates the predictions, which is why a
+ * non-positive y is #NUM! there and unremarkable here.
+ */
+function trendImpl(args: Value[], ctx: FunctionContext, exponential: boolean): Value {
+  const input = regressionInput(
+    block(args[0], ctx),
+    args[1] === undefined ? undefined : block(args[1], ctx),
+  );
+  if (isError(input)) return input;
+  const useConst = boolArg(args[3], true);
+  if (isError(useConst)) return useConst;
+
+  let y = input.y;
+  if (exponential) {
+    const logs: number[] = [];
+    for (const v of y) {
+      if (v <= 0) return CellError.NUM;
+      logs.push(Math.log(v));
+    }
+    y = logs;
+  }
+  const reg = leastSquares(input.xs, y, useConst);
+  if (!reg) return CellError.NUM;
+
+  const target = newObservations(args[2] === undefined ? undefined : block(args[2], ctx), input);
+  if (isError(target)) return target;
+  const data: Scalar[] = target.rows.map((row) => {
+    const fit = predict(reg, row);
+    const value = exponential ? Math.exp(fit) : fit;
+    return Number.isFinite(value) ? value : CellError.NUM;
+  });
+  return makeArray(target.shape.rows, target.shape.cols, data);
+}
+
+const TABULATION: FunctionSpec[] = [
+  {
+    name: 'FREQUENCY',
+    params: [p.array('data_array'), p.array('bins_array')],
+    summary: 'Returns a frequency distribution as a vertical array.',
+    impl: (args, ctx) => {
+      const data = numbersIn(block(args[0], ctx));
+      if (isError(data)) return data;
+      const bins = numbersIn(block(args[1], ctx));
+      if (isError(bins)) return bins;
+      if (bins.length === 0) return makeArray(1, 1, [data.length]);
+      // Bins are compared in ascending order; an unsorted bins_array would
+      // otherwise report intervals that overlap.
+      const edges = [...bins].sort((a, b) => a - b);
+      const counts = new Array<number>(edges.length + 1).fill(0);
+      for (const x of data) {
+        let i = 0;
+        while (i < edges.length && x > edges[i]!) i++;
+        counts[i] = counts[i]! + 1;
+      }
+      return makeArray(counts.length, 1, counts);
+    },
+  },
+  {
+    name: 'PROB',
+    params: [
+      p.array('x_range'),
+      p.array('prob_range'),
+      p.scalar('lower_limit'),
+      p.scalar('upper_limit', true),
+    ],
+    summary: 'Returns the probability that values are between two limits.',
+    impl: (args, ctx) => {
+      const xs = block(args[0], ctx);
+      const ps = block(args[1], ctx);
+      const pairs = pairsOf(xs, ps);
+      if (isError(pairs)) return pairs;
+      const lower = numArg(args[2]);
+      if (isError(lower)) return lower;
+      const upper = args[3] === undefined ? lower : numArg(args[3]);
+      if (isError(upper)) return upper;
+
+      let total = 0;
+      for (const q of pairs.ys) {
+        if (q <= 0 || q > 1) return CellError.NUM;
+        total = excelAdd(total, q);
+      }
+      // Excel insists the probabilities are a distribution, to within the
+      // fifteen digits it displays.
+      if (Math.abs(total - 1) > 1e-9) return CellError.NUM;
+
+      let acc = 0;
+      for (let i = 0; i < pairs.xs.length; i++) {
+        const x = pairs.xs[i]!;
+        if (x >= lower && x <= upper) acc = excelAdd(acc, pairs.ys[i]!);
+      }
+      return acc;
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Distributions
+// ---------------------------------------------------------------------------
+
+const NORMAL: FunctionSpec[] = [
+  {
+    name: 'NORM.DIST',
+    params: [p.scalar('x'), p.scalar('mean'), p.scalar('standard_dev'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the normal cumulative distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const sd = numArg(args[2]);
+      if (isError(sd)) return sd;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (sd <= 0) return CellError.NUM;
+      const z = excelSub(x, mean) / sd;
+      return cumulative ? normCdf(z) : normPdf(z) / sd;
+    },
+  },
+  {
+    name: 'NORM.INV',
+    params: [p.scalar('probability'), p.scalar('mean'), p.scalar('standard_dev')],
+    broadcast: true,
+    summary: 'Returns the inverse of the normal cumulative distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const sd = numArg(args[2]);
+      if (isError(sd)) return sd;
+      if (sd <= 0 || prob <= 0 || prob >= 1) return CellError.NUM;
+      return finite(excelAdd(mean, sd * normInv(prob)));
+    },
+  },
+  {
+    name: 'NORM.S.DIST',
+    params: [p.scalar('z'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the standard normal cumulative distribution.',
+    impl: (args) => {
+      const z = numArg(args[0]);
+      if (isError(z)) return z;
+      const cumulative = boolArg(args[1], true);
+      if (isError(cumulative)) return cumulative;
+      return cumulative ? normCdf(z) : normPdf(z);
+    },
+  },
+  {
+    name: 'NORM.S.INV',
+    params: [p.scalar('probability')],
+    broadcast: true,
+    summary: 'Returns the inverse of the standard normal cumulative distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      if (prob <= 0 || prob >= 1) return CellError.NUM;
+      return normInv(prob);
+    },
+  },
+  {
+    name: 'LOGNORM.DIST',
+    params: [p.scalar('x'), p.scalar('mean'), p.scalar('standard_dev'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the cumulative lognormal distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const sd = numArg(args[2]);
+      if (isError(sd)) return sd;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (sd <= 0 || x <= 0) return CellError.NUM;
+      const z = excelSub(Math.log(x), mean) / sd;
+      return cumulative ? normCdf(z) : normPdf(z) / (x * sd);
+    },
+  },
+  {
+    name: 'LOGNORM.INV',
+    params: [p.scalar('probability'), p.scalar('mean'), p.scalar('standard_dev')],
+    broadcast: true,
+    summary: 'Returns the inverse of the lognormal cumulative distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const sd = numArg(args[2]);
+      if (isError(sd)) return sd;
+      if (sd <= 0 || prob <= 0 || prob >= 1) return CellError.NUM;
+      return finite(Math.exp(excelAdd(mean, sd * normInv(prob))));
+    },
+  },
+  {
+    name: 'PHI',
+    params: [p.scalar('x')],
+    broadcast: true,
+    summary: 'Returns the value of the density function for a standard normal distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      return isError(x) ? x : normPdf(x);
+    },
+  },
+  {
+    name: 'GAUSS',
+    params: [p.scalar('z')],
+    broadcast: true,
+    summary: 'Returns 0.5 less than the standard normal cumulative distribution.',
+    impl: (args) => {
+      const z = numArg(args[0]);
+      if (isError(z)) return z;
+      // Written as half the error function rather than as normCdf(z) - 0.5, so
+      // that a small z keeps its significant digits instead of cancelling
+      // against the 0.5.
+      return erf(z / SQRT_2) / 2;
+    },
+  },
+  {
+    name: 'CONFIDENCE.NORM',
+    params: [p.scalar('alpha'), p.scalar('standard_dev'), p.scalar('size')],
+    summary: 'Returns the confidence interval for a population mean.',
+    impl: (args) => {
+      const alpha = numArg(args[0]);
+      if (isError(alpha)) return alpha;
+      const sd = numArg(args[1]);
+      if (isError(sd)) return sd;
+      const size = numArg(args[2]);
+      if (isError(size)) return size;
+      const n = Math.trunc(size);
+      if (alpha <= 0 || alpha >= 1 || sd <= 0 || n < 1) return CellError.NUM;
+      return finite((normInv(1 - alpha / 2) * sd) / Math.sqrt(n));
+    },
+  },
+  {
+    name: 'CONFIDENCE.T',
+    params: [p.scalar('alpha'), p.scalar('standard_dev'), p.scalar('size')],
+    summary: 'Returns the confidence interval for a population mean, using a Student t distribution.',
+    impl: (args) => {
+      const alpha = numArg(args[0]);
+      if (isError(alpha)) return alpha;
+      const sd = numArg(args[1]);
+      if (isError(sd)) return sd;
+      const size = numArg(args[2]);
+      if (isError(size)) return size;
+      const n = Math.trunc(size);
+      if (alpha <= 0 || alpha >= 1 || sd <= 0 || n < 1) return CellError.NUM;
+      // A single observation leaves no degrees of freedom, so the t quantile
+      // does not exist rather than being out of range.
+      if (n === 1) return CellError.DIV0;
+      const t = invertCdf((x) => studentTCdf(x, n - 1), 1 - alpha / 2, 0, Number.POSITIVE_INFINITY);
+      if (isError(t)) return t;
+      return finite((t * sd) / Math.sqrt(n));
+    },
+  },
+];
+
+const STUDENT_T: FunctionSpec[] = [
+  {
+    name: 'T.DIST',
+    params: [p.scalar('x'), p.scalar('deg_freedom'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the left-tailed Student t-distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      const cumulative = boolArg(args[2], true);
+      if (isError(cumulative)) return cumulative;
+      if (df < 1) return CellError.NUM;
+      return cumulative ? studentTCdf(x, df) : studentTPdf(x, df);
+    },
+  },
+  {
+    name: 'T.DIST.2T',
+    params: [p.scalar('x'), p.scalar('deg_freedom')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the two-tailed Student t-distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (df < 1 || x < 0) return CellError.NUM;
+      return 2 * (1 - studentTCdf(x, df));
+    },
+  },
+  {
+    name: 'T.DIST.RT',
+    params: [p.scalar('x'), p.scalar('deg_freedom')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the right-tailed Student t-distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (df < 1) return CellError.NUM;
+      return 1 - studentTCdf(x, df);
+    },
+  },
+  {
+    name: 'T.INV',
+    params: [p.scalar('probability'), p.scalar('deg_freedom')],
+    broadcast: true,
+    summary: 'Returns the left-tailed inverse of the Student t-distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (df < 1 || prob <= 0 || prob >= 1) return CellError.NUM;
+      return invertCdf(
+        (x) => studentTCdf(x, df),
+        prob,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+      );
+    },
+  },
+  {
+    name: 'T.INV.2T',
+    params: [p.scalar('probability'), p.scalar('deg_freedom')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the two-tailed inverse of the Student t-distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (df < 1 || prob <= 0 || prob > 1) return CellError.NUM;
+      return invertCdf((x) => studentTCdf(x, df), 1 - prob / 2, 0, Number.POSITIVE_INFINITY);
+    },
+  },
+];
+
+const FISHER_F: FunctionSpec[] = [
+  {
+    name: 'F.DIST',
+    params: [
+      p.scalar('x'),
+      p.scalar('deg_freedom1'),
+      p.scalar('deg_freedom2'),
+      p.scalar('cumulative'),
+    ],
+    broadcast: true,
+    summary: 'Returns the F probability distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df1 = intArg(args[1]);
+      if (isError(df1)) return df1;
+      const df2 = intArg(args[2]);
+      if (isError(df2)) return df2;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (x < 0 || df1 < 1 || df2 < 1) return CellError.NUM;
+      return cumulative ? fCdf(x, df1, df2) : finite(fPdf(x, df1, df2));
+    },
+  },
+  {
+    name: 'F.DIST.RT',
+    params: [p.scalar('x'), p.scalar('deg_freedom1'), p.scalar('deg_freedom2')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the right-tailed F probability distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df1 = intArg(args[1]);
+      if (isError(df1)) return df1;
+      const df2 = intArg(args[2]);
+      if (isError(df2)) return df2;
+      if (x < 0 || df1 < 1 || df2 < 1) return CellError.NUM;
+      return 1 - fCdf(x, df1, df2);
+    },
+  },
+  {
+    name: 'F.INV',
+    params: [p.scalar('probability'), p.scalar('deg_freedom1'), p.scalar('deg_freedom2')],
+    broadcast: true,
+    summary: 'Returns the inverse of the F probability distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const df1 = intArg(args[1]);
+      if (isError(df1)) return df1;
+      const df2 = intArg(args[2]);
+      if (isError(df2)) return df2;
+      if (prob < 0 || prob > 1 || df1 < 1 || df2 < 1) return CellError.NUM;
+      if (prob === 0) return 0;
+      if (prob === 1) return CellError.NUM;
+      return invertCdf((x) => fCdf(x, df1, df2), prob, 0, Number.POSITIVE_INFINITY);
+    },
+  },
+  {
+    name: 'F.INV.RT',
+    params: [p.scalar('probability'), p.scalar('deg_freedom1'), p.scalar('deg_freedom2')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the inverse of the right-tailed F probability distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const df1 = intArg(args[1]);
+      if (isError(df1)) return df1;
+      const df2 = intArg(args[2]);
+      if (isError(df2)) return df2;
+      if (prob < 0 || prob > 1 || df1 < 1 || df2 < 1) return CellError.NUM;
+      if (prob === 1) return 0;
+      if (prob === 0) return CellError.NUM;
+      return invertCdf((x) => fCdf(x, df1, df2), 1 - prob, 0, Number.POSITIVE_INFINITY);
+    },
+  },
+];
+
+const CHI_SQUARE: FunctionSpec[] = [
+  {
+    name: 'CHISQ.DIST',
+    params: [p.scalar('x'), p.scalar('deg_freedom'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the left-tailed chi-squared distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      const cumulative = boolArg(args[2], true);
+      if (isError(cumulative)) return cumulative;
+      if (x < 0 || df < 1) return CellError.NUM;
+      return cumulative ? chiSqCdf(x, df) : finite(chiSqPdf(x, df));
+    },
+  },
+  {
+    name: 'CHISQ.DIST.RT',
+    params: [p.scalar('x'), p.scalar('deg_freedom')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the right-tailed chi-squared distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (x < 0 || df < 1) return CellError.NUM;
+      return gammaQ(df / 2, x / 2);
+    },
+  },
+  {
+    name: 'CHISQ.INV',
+    params: [p.scalar('probability'), p.scalar('deg_freedom')],
+    broadcast: true,
+    summary: 'Returns the inverse of the left-tailed chi-squared distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (prob < 0 || prob > 1 || df < 1) return CellError.NUM;
+      if (prob === 0) return 0;
+      if (prob === 1) return CellError.NUM;
+      return invertCdf((x) => chiSqCdf(x, df), prob, 0, Number.POSITIVE_INFINITY);
+    },
+  },
+  {
+    name: 'CHISQ.INV.RT',
+    params: [p.scalar('probability'), p.scalar('deg_freedom')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the inverse of the right-tailed chi-squared distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      if (prob < 0 || prob > 1 || df < 1) return CellError.NUM;
+      if (prob === 1) return 0;
+      if (prob === 0) return CellError.NUM;
+      return invertCdf((x) => chiSqCdf(x, df), 1 - prob, 0, Number.POSITIVE_INFINITY);
+    },
+  },
+];
+
+const DISCRETE: FunctionSpec[] = [
+  {
+    name: 'BINOM.DIST',
+    params: [
+      p.scalar('number_s'),
+      p.scalar('trials'),
+      p.scalar('probability_s'),
+      p.scalar('cumulative'),
+    ],
+    broadcast: true,
+    summary: 'Returns the individual term binomial distribution probability.',
+    impl: (args) => {
+      const k = intArg(args[0]);
+      if (isError(k)) return k;
+      const n = intArg(args[1]);
+      if (isError(n)) return n;
+      const prob = numArg(args[2]);
+      if (isError(prob)) return prob;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (n < 0 || k < 0 || k > n || prob < 0 || prob > 1) return CellError.NUM;
+      return cumulative ? binomCdf(k, n, prob) : binomPmf(k, n, prob);
+    },
+  },
+  {
+    name: 'BINOM.INV',
+    params: [p.scalar('trials'), p.scalar('probability_s'), p.scalar('alpha')],
+    broadcast: true,
+    summary: 'Returns the smallest value for which the cumulative binomial distribution is at least alpha.',
+    impl: (args) => {
+      const n = intArg(args[0]);
+      if (isError(n)) return n;
+      const prob = numArg(args[1]);
+      if (isError(prob)) return prob;
+      const alpha = numArg(args[2]);
+      if (isError(alpha)) return alpha;
+      if (n < 0 || prob < 0 || prob > 1 || alpha <= 0 || alpha >= 1) return CellError.NUM;
+      // The CDF is non-decreasing in k, so the smallest qualifying k is found by
+      // bisection rather than by summing terms from zero.
+      let lo = 0;
+      let hi = n;
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (binomCdf(mid, n, prob) >= alpha) hi = mid;
+        else lo = mid + 1;
+      }
+      return lo;
+    },
+  },
+  {
+    name: 'NEGBINOM.DIST',
+    params: [
+      p.scalar('number_f'),
+      p.scalar('number_s'),
+      p.scalar('probability_s'),
+      p.scalar('cumulative'),
+    ],
+    broadcast: true,
+    summary: 'Returns the negative binomial distribution.',
+    impl: (args) => {
+      const f = intArg(args[0]);
+      if (isError(f)) return f;
+      const s = intArg(args[1]);
+      if (isError(s)) return s;
+      const prob = numArg(args[2]);
+      if (isError(prob)) return prob;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (f < 0 || s < 1 || prob <= 0 || prob > 1) return CellError.NUM;
+      if (cumulative) return betaI(s, f + 1, prob);
+      return Math.exp(
+        lnChoose(f + s - 1, s - 1) + s * Math.log(prob) + f * Math.log1p(-prob),
+      );
+    },
+  },
+  {
+    name: 'POISSON.DIST',
+    params: [p.scalar('x'), p.scalar('mean'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the Poisson distribution.',
+    impl: (args) => {
+      const x = intArg(args[0]);
+      if (isError(x)) return x;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const cumulative = boolArg(args[2], true);
+      if (isError(cumulative)) return cumulative;
+      if (x < 0 || mean < 0) return CellError.NUM;
+      return cumulative ? poissonCdf(x, mean) : poissonPmf(x, mean);
+    },
+  },
+  {
+    name: 'HYPGEOM.DIST',
+    params: [
+      p.scalar('sample_s'),
+      p.scalar('number_sample'),
+      p.scalar('population_s'),
+      p.scalar('number_pop'),
+      p.scalar('cumulative'),
+    ],
+    broadcast: true,
+    summary: 'Returns the hypergeometric distribution.',
+    impl: (args) => {
+      const k = intArg(args[0]);
+      if (isError(k)) return k;
+      const n = intArg(args[1]);
+      if (isError(n)) return n;
+      const successes = intArg(args[2]);
+      if (isError(successes)) return successes;
+      const population = intArg(args[3]);
+      if (isError(population)) return population;
+      const cumulative = boolArg(args[4], true);
+      if (isError(cumulative)) return cumulative;
+      if (population <= 0 || n <= 0 || n > population) return CellError.NUM;
+      if (successes <= 0 || successes > population) return CellError.NUM;
+      // The sample cannot hold more successes than exist, nor fewer than the
+      // failures available allow.
+      if (k < Math.max(0, n - (population - successes)) || k > Math.min(n, successes)) {
+        return CellError.NUM;
+      }
+      if (!cumulative) return hypgeomPmf(k, n, successes, population);
+      let acc = 0;
+      for (let i = Math.max(0, n - (population - successes)); i <= k; i++) {
+        acc = excelAdd(acc, hypgeomPmf(i, n, successes, population));
+      }
+      return acc;
+    },
+  },
+];
+
+const CONTINUOUS: FunctionSpec[] = [
+  {
+    name: 'EXPON.DIST',
+    params: [p.scalar('x'), p.scalar('lambda'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the exponential distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const lambda = numArg(args[1]);
+      if (isError(lambda)) return lambda;
+      const cumulative = boolArg(args[2], true);
+      if (isError(cumulative)) return cumulative;
+      if (x < 0 || lambda <= 0) return CellError.NUM;
+      // -expm1(-lx) rather than 1 - exp(-lx): for a small lx the subtraction
+      // would throw away most of the significant digits.
+      return cumulative ? -Math.expm1(-lambda * x) : lambda * Math.exp(-lambda * x);
+    },
+  },
+  {
+    name: 'WEIBULL.DIST',
+    params: [p.scalar('x'), p.scalar('alpha'), p.scalar('beta'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the Weibull distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const alpha = numArg(args[1]);
+      if (isError(alpha)) return alpha;
+      const beta = numArg(args[2]);
+      if (isError(beta)) return beta;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (x < 0 || alpha <= 0 || beta <= 0) return CellError.NUM;
+      const scaled = (x / beta) ** alpha;
+      if (cumulative) return -Math.expm1(-scaled);
+      return finite((alpha / beta ** alpha) * x ** (alpha - 1) * Math.exp(-scaled));
+    },
+  },
+  {
+    name: 'GAMMA.DIST',
+    params: [p.scalar('x'), p.scalar('alpha'), p.scalar('beta'), p.scalar('cumulative')],
+    broadcast: true,
+    summary: 'Returns the gamma distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const alpha = numArg(args[1]);
+      if (isError(alpha)) return alpha;
+      const beta = numArg(args[2]);
+      if (isError(beta)) return beta;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      if (x < 0 || alpha <= 0 || beta <= 0) return CellError.NUM;
+      if (cumulative) return gammaP(alpha, x / beta);
+      if (x === 0) return alpha < 1 ? CellError.NUM : alpha === 1 ? 1 / beta : 0;
+      return finite(
+        Math.exp((alpha - 1) * Math.log(x) - x / beta - alpha * Math.log(beta) - lnGamma(alpha)),
+      );
+    },
+  },
+  {
+    name: 'GAMMA.INV',
+    params: [p.scalar('probability'), p.scalar('alpha'), p.scalar('beta')],
+    broadcast: true,
+    summary: 'Returns the inverse of the gamma cumulative distribution.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const alpha = numArg(args[1]);
+      if (isError(alpha)) return alpha;
+      const beta = numArg(args[2]);
+      if (isError(beta)) return beta;
+      if (prob < 0 || prob > 1 || alpha <= 0 || beta <= 0) return CellError.NUM;
+      if (prob === 0) return 0;
+      if (prob === 1) return CellError.NUM;
+      const x = invertCdf((v) => gammaP(alpha, v), prob, 0, Number.POSITIVE_INFINITY);
+      return isError(x) ? x : finite(x * beta);
+    },
+  },
+  {
+    name: 'BETA.DIST',
+    params: [
+      p.scalar('x'),
+      p.scalar('alpha'),
+      p.scalar('beta'),
+      p.scalar('cumulative'),
+      p.scalar('A', true),
+      p.scalar('B', true),
+    ],
+    broadcast: true,
+    summary: 'Returns the beta cumulative distribution function.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const alpha = numArg(args[1]);
+      if (isError(alpha)) return alpha;
+      const beta = numArg(args[2]);
+      if (isError(beta)) return beta;
+      const cumulative = boolArg(args[3], true);
+      if (isError(cumulative)) return cumulative;
+      const lower = numArg(args[4], 0);
+      if (isError(lower)) return lower;
+      const upper = numArg(args[5], 1);
+      if (isError(upper)) return upper;
+      if (alpha <= 0 || beta <= 0) return CellError.NUM;
+      if (upper === lower || x < lower || x > upper) return CellError.NUM;
+      const width = excelSub(upper, lower);
+      const z = excelSub(x, lower) / width;
+      if (cumulative) return betaI(alpha, beta, z);
+      if ((z === 0 && alpha < 1) || (z === 1 && beta < 1)) return CellError.NUM;
+      return finite(
+        Math.exp(
+          lnGamma(alpha + beta) -
+            lnGamma(alpha) -
+            lnGamma(beta) +
+            (alpha - 1) * Math.log(z) +
+            (beta - 1) * Math.log1p(-z),
+        ) / width,
+      );
+    },
+  },
+  {
+    name: 'BETA.INV',
+    params: [
+      p.scalar('probability'),
+      p.scalar('alpha'),
+      p.scalar('beta'),
+      p.scalar('A', true),
+      p.scalar('B', true),
+    ],
+    broadcast: true,
+    summary: 'Returns the inverse of the beta cumulative distribution function.',
+    impl: (args) => {
+      const prob = numArg(args[0]);
+      if (isError(prob)) return prob;
+      const alpha = numArg(args[1]);
+      if (isError(alpha)) return alpha;
+      const beta = numArg(args[2]);
+      if (isError(beta)) return beta;
+      const lower = numArg(args[3], 0);
+      if (isError(lower)) return lower;
+      const upper = numArg(args[4], 1);
+      if (isError(upper)) return upper;
+      if (alpha <= 0 || beta <= 0 || prob <= 0 || prob > 1) return CellError.NUM;
+      const z = invertCdf((v) => betaI(alpha, beta, v), prob, 0, 1);
+      if (isError(z)) return z;
+      return finite(excelAdd(lower, z * excelSub(upper, lower)));
+    },
+  },
+];
+
+const SPECIAL: FunctionSpec[] = [
+  {
+    name: 'GAMMA',
+    params: [p.scalar('x')],
+    broadcast: true,
+    summary: 'Returns the gamma function value.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      return isError(x) ? x : gammaFn(x);
+    },
+  },
+  {
+    name: 'GAMMALN',
+    params: [p.scalar('x')],
+    broadcast: true,
+    summary: 'Returns the natural logarithm of the gamma function.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      if (x <= 0) return CellError.NUM;
+      return finite(lnGamma(x));
+    },
+  },
+  {
+    name: 'GAMMALN.PRECISE',
+    params: [p.scalar('x')],
+    broadcast: true,
+    futureFunction: true,
+    summary: 'Returns the natural logarithm of the gamma function.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      if (x <= 0) return CellError.NUM;
+      return finite(lnGamma(x));
+    },
+  },
+  {
+    name: 'FISHER',
+    params: [p.scalar('x')],
+    broadcast: true,
+    summary: 'Returns the Fisher transformation.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      if (x <= -1 || x >= 1) return CellError.NUM;
+      return Math.atanh(x);
+    },
+  },
+  {
+    name: 'FISHERINV',
+    params: [p.scalar('y')],
+    broadcast: true,
+    summary: 'Returns the inverse of the Fisher transformation.',
+    impl: (args) => {
+      const y = numArg(args[0]);
+      return isError(y) ? y : Math.tanh(y);
+    },
+  },
+  {
+    name: 'ERF',
+    params: [p.scalar('lower_limit'), p.scalar('upper_limit', true)],
+    broadcast: true,
+    summary: 'Returns the error function.',
+    impl: (args) => {
+      const lower = numArg(args[0]);
+      if (isError(lower)) return lower;
+      if (args[1] === undefined) return erf(lower);
+      const upper = numArg(args[1]);
+      if (isError(upper)) return upper;
+      return excelSub(erf(upper), erf(lower));
+    },
+  },
+  {
+    name: 'ERFC',
+    params: [p.scalar('x')],
+    broadcast: true,
+    summary: 'Returns the complementary error function.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      return isError(x) ? x : erfc(x);
+    },
+  },
+];
+
+const HYPOTHESIS_TESTS: FunctionSpec[] = [
+  {
+    name: 'Z.TEST',
+    params: [p.any('array'), p.scalar('x'), p.scalar('sigma', true)],
+    summary: 'Returns the one-tailed probability value of a z-test.',
+    impl: (args, ctx) => {
+      const nums = numbersOf([args[0]], ctx);
+      if (isError(nums)) return nums;
+      const x = numArg(args[1]);
+      if (isError(x)) return x;
+      if (nums.length === 0) return CellError.NA;
+      let sigma: number;
+      if (args[2] === undefined) {
+        const s = stdevOf(nums, true);
+        if (isError(s)) return s;
+        sigma = s;
+      } else {
+        const given = numArg(args[2]);
+        if (isError(given)) return given;
+        sigma = given;
+      }
+      if (sigma <= 0) return CellError.NUM;
+      const z = (excelSub(meanOf(nums), x) / sigma) * Math.sqrt(nums.length);
+      return 1 - normCdf(z);
+    },
+  },
+  {
+    name: 'T.TEST',
+    params: [p.array('array1'), p.array('array2'), p.scalar('tails'), p.scalar('type')],
+    summary: 'Returns the probability associated with a Student t-test.',
+    impl: (args, ctx) => {
+      const tails = intArg(args[2]);
+      if (isError(tails)) return tails;
+      const type = intArg(args[3]);
+      if (isError(type)) return type;
+      if (tails !== 1 && tails !== 2) return CellError.NUM;
+      if (type < 1 || type > 3) return CellError.NUM;
+
+      const a = block(args[0], ctx);
+      const b = block(args[1], ctx);
+
+      let t: number;
+      let df: number;
+      if (type === 1) {
+        const pairs = pairsOf(a, b);
+        if (isError(pairs)) return pairs;
+        const differences: number[] = [];
+        for (let i = 0; i < pairs.xs.length; i++) {
+          differences.push(excelSub(pairs.xs[i]!, pairs.ys[i]!));
+        }
+        const n = differences.length;
+        if (n < 2) return CellError.DIV0;
+        const sd = stdevOf(differences, true);
+        if (isError(sd)) return sd;
+        if (sd === 0) return CellError.DIV0;
+        t = Math.abs((meanOf(differences) / sd) * Math.sqrt(n));
+        df = n - 1;
+      } else {
+        const xs = numbersIn(a);
+        if (isError(xs)) return xs;
+        const ys = numbersIn(b);
+        if (isError(ys)) return ys;
+        const n1 = xs.length;
+        const n2 = ys.length;
+        if (n1 < 2 || n2 < 2) return CellError.DIV0;
+        const v1 = varianceOf(xs, true);
+        if (isError(v1)) return v1;
+        const v2 = varianceOf(ys, true);
+        if (isError(v2)) return v2;
+        const difference = excelSub(meanOf(xs), meanOf(ys));
+        if (type === 2) {
+          const pooled = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2);
+          if (pooled === 0) return CellError.DIV0;
+          t = Math.abs(difference / Math.sqrt(pooled * (1 / n1 + 1 / n2)));
+          df = n1 + n2 - 2;
+        } else {
+          const se = v1 / n1 + v2 / n2;
+          if (se === 0) return CellError.DIV0;
+          t = Math.abs(difference / Math.sqrt(se));
+          // Welch-Satterthwaite. Excel keeps the fractional degrees of freedom
+          // rather than truncating them, and the answer differs visibly if you
+          // round here.
+          df = (se * se) / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1));
+        }
+      }
+      const rightTail = 1 - studentTCdf(t, df);
+      return tails === 1 ? rightTail : 2 * rightTail;
+    },
+  },
+  {
+    name: 'F.TEST',
+    params: [p.array('array1'), p.array('array2')],
+    summary: 'Returns the result of an F-test.',
+    impl: (args, ctx) => {
+      const xs = numbersIn(block(args[0], ctx));
+      if (isError(xs)) return xs;
+      const ys = numbersIn(block(args[1], ctx));
+      if (isError(ys)) return ys;
+      if (xs.length < 2 || ys.length < 2) return CellError.DIV0;
+      const v1 = varianceOf(xs, true);
+      if (isError(v1)) return v1;
+      const v2 = varianceOf(ys, true);
+      if (isError(v2)) return v2;
+      if (v1 === 0 || v2 === 0) return CellError.DIV0;
+      const ratio = v1 / v2;
+      let tail = 1 - fCdf(ratio, xs.length - 1, ys.length - 1);
+      // The statistic may land in either tail depending on which sample happened
+      // to be more variable; the reported probability is always two-sided.
+      if (tail > 0.5) tail = 1 - tail;
+      return 2 * tail;
+    },
+  },
+  {
+    name: 'CHISQ.TEST',
+    params: [p.array('actual_range'), p.array('expected_range')],
+    summary: 'Returns the test for independence.',
+    impl: (args, ctx) => {
+      const actual = block(args[0], ctx);
+      const expected = block(args[1], ctx);
+      if (actual.rows !== expected.rows || actual.cols !== expected.cols) return CellError.NA;
+      let chi = 0;
+      for (let i = 0; i < actual.data.length; i++) {
+        const a = actual.data[i] ?? null;
+        const e = expected.data[i] ?? null;
+        if (isError(a)) return a;
+        if (isError(e)) return e;
+        if (typeof a !== 'number' || typeof e !== 'number') continue;
+        if (e === 0) return CellError.DIV0;
+        const d = excelSub(a, e);
+        chi = excelAdd(chi, (d * d) / e);
+      }
+      // A single row or column is a goodness-of-fit test with n-1 degrees of
+      // freedom; a genuine table has (r-1)(c-1).
+      const df =
+        actual.rows === 1 || actual.cols === 1
+          ? actual.rows * actual.cols - 1
+          : (actual.rows - 1) * (actual.cols - 1);
+      if (df < 1) return CellError.NA;
+      return gammaQ(df / 2, chi / 2);
+    },
+  },
+];
+
+export const STATISTICAL_FUNCTIONS: readonly FunctionSpec[] = [
+  ...COUNTING,
+  ...AVERAGES,
+  ...EXTREMES,
+  ...ORDER_STATISTICS,
+  ...DISPERSION,
+  ...RELATIONSHIPS,
+  ...REGRESSION,
+  ...TABULATION,
+  ...NORMAL,
+  ...STUDENT_T,
+  ...FISHER_F,
+  ...CHI_SQUARE,
+  ...DISCRETE,
+  ...CONTINUOUS,
+  ...SPECIAL,
+  ...HYPOTHESIS_TESTS,
+];

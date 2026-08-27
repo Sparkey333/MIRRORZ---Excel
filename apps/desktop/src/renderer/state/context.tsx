@@ -55,12 +55,13 @@ export function createController(
   workbook = new Workbook(),
   options: ControllerOptions = {},
 ): AppController {
+  // The first sheet is created on the workbook, not through the document: it is
+  // part of the initial state, and an entry for it in the command log would mean
+  // jumping to the beginning of the history deleted the sheet.
+  if (workbook.sheets.length === 0) workbook.addSheet('Sheet1');
   const doc = new Document(workbook);
   const registry = createRegistry();
   const engine = new Engine(doc, registry);
-  if (workbook.sheets.length === 0) {
-    doc.addSheet('Sheet1', undefined, { label: 'New workbook', origin: 'system' });
-  }
   engine.indexWorkbook();
   return new AppController(doc, engine, registry, options);
 }

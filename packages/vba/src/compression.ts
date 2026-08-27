@@ -272,8 +272,9 @@ function encodeChunk(
   const body = new Uint8Array(MAX_CHUNK_COMPRESSED);
   let p = 0;
   let d = start;
+  let full = false;
 
-  while (d < end && p < MAX_CHUNK_COMPRESSED) {
+  while (!full && d < end && p < MAX_CHUNK_COMPRESSED) {
     // The flag byte describes the eight tokens that follow, so its slot is
     // reserved now and filled in once they are known.
     const flagIndex = p;
@@ -283,18 +284,22 @@ function encodeChunk(
       if (d >= end || p >= MAX_CHUNK_COMPRESSED) break;
       const match = literalsOnly ? { offset: 0, length: 0 } : findMatch(input, start, d, end);
       if (match.offset !== 0) {
-        if (p + 1 < MAX_CHUNK_COMPRESSED) {
-          const bitCount = copyTokenBitCount(d - start);
-          const token = (((match.offset - 1) << (16 - bitCount)) | (match.length - 3)) & 0xffff;
-          body[p] = token & 0xff;
-          body[p + 1] = (token >>> 8) & 0xff;
-          flags |= 1 << index;
-          p += 2;
-          d += match.length;
-        } else {
-          (globalThis as any).__tokenOverflow = true;
-          p = MAX_CHUNK_COMPRESSED;
+        if (p + 1 >= MAX_CHUNK_COMPRESSED) {
+          // One byte left and a two byte token to write: the chunk is full.
+          // Stop where the last complete token ended. `p` must not be advanced
+          // past the bytes actually written - the body is sliced at `p`, and an
+          // untouched byte inside that slice is decoded as a literal, silently
+          // inserting a NUL into the round trip.
+          full = true;
+          break;
         }
+        const bitCount = copyTokenBitCount(d - start);
+        const token = (((match.offset - 1) << (16 - bitCount)) | (match.length - 3)) & 0xffff;
+        body[p] = token & 0xff;
+        body[p + 1] = (token >>> 8) & 0xff;
+        flags |= 1 << index;
+        p += 2;
+        d += match.length;
       } else {
         body[p++] = input[d++]!;
       }

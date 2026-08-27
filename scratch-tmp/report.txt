@@ -1,0 +1,13 @@
+MISMATCH AVERAGE(D!E1:E5)
+   mine=15
+     lo=10.3333333333333
+MISMATCH COUNT(D!E1:E5)
+   mine=2
+     lo=3
+MISMATCH MODE.SNGL(D!D1:D8)
+   mine=#N/A
+     lo=#VALUE!
+MISMATCH PERCENTRANK.EXC(D!A1:A8,7)
+   mine=0.555
+     lo=0.556
+checked, mismatches=4

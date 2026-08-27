@@ -183,7 +183,7 @@ function paintPane(
   pane: PaneLayout,
   stats: RenderStats,
 ): void {
-  const { sheet, theme, layout } = input;
+  const { sheet } = input;
   if (pane.rows.length === 0 || pane.cols.length === 0) return;
 
   const firstRow = (pane.rows[0] as Span).index;
@@ -221,15 +221,13 @@ function paintPane(
 
   paintFills(ctx, input, pane, covered, stats);
   if (input.showGridLines !== false) paintGridLines(ctx, input, pane, stats);
-  paintMergeBodies(ctx, input, pane, visibleMerges, stats);
+  paintMergeBodies(ctx, input, visibleMerges, stats);
   paintBorders(ctx, input, pane, covered, stats);
   paintText(ctx, input, pane, covered, stats);
-  paintMergeText(ctx, input, pane, visibleMerges, stats);
+  paintMergeText(ctx, input, visibleMerges, stats);
   if (input.selection) paintSelection(ctx, input, pane, input.selection);
 
   ctx.restore();
-  void theme;
-  void layout;
 }
 
 function paintFills(
@@ -308,7 +306,6 @@ function lastEdge(spans: readonly Span[]): number {
 function paintMergeBodies(
   ctx: GridRenderingContext,
   input: RenderInput,
-  pane: PaneLayout,
   merges: readonly MergeInfo[],
   stats: RenderStats,
 ): void {
@@ -335,7 +332,6 @@ function paintMergeBodies(
     ctx.stroke();
     stats.gridLines++;
   }
-  void pane;
 }
 
 function mergeRect(input: RenderInput, range: GridRange): Rect {
@@ -452,7 +448,7 @@ function strokeEdge(
 ): void {
   const spec = borderStroke(style);
   ctx.strokeStyle = resolveColor(color, palette) ?? '#000000';
-  ctx.lineWidth = spec.width / dpr > 0 ? spec.width : 1;
+  ctx.lineWidth = spec.width;
   ctx.setLineDash(spec.dash);
   if (spec.double) {
     // Excel's double border is two hairlines with a one-pixel gap.
@@ -512,7 +508,6 @@ function paintText(
 function paintMergeText(
   ctx: GridRenderingContext,
   input: RenderInput,
-  pane: PaneLayout,
   merges: readonly MergeInfo[],
   stats: RenderStats,
 ): void {
@@ -526,7 +521,6 @@ function paintMergeText(
       stats.cellsPainted++;
     }
   }
-  void pane;
 }
 
 export function formatCodeOf(style: CellStyle): string {
@@ -825,7 +819,6 @@ function drawRotated(
 
   const degrees = rotation <= 90 ? -rotation : rotation - 90;
   const radians = (degrees * Math.PI) / 180;
-  const width = measure.measure(ctx, text, font);
   // Anchor at the bottom-left for CCW rotation and the top-left for CW, which is
   // where Excel pins rotated text inside the cell.
   const anchorX = rect.x + CELL_PAD;
@@ -834,7 +827,6 @@ function drawRotated(
   ctx.rotate(radians);
   ctx.fillText(text, 0, 0);
   ctx.restore();
-  void width;
 }
 
 function indentStep(

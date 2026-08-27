@@ -29,7 +29,7 @@
  * description is a much better outcome than showing the user nothing.
  */
 
-import { type CfbFile, readCfb } from '../../formats/src/cfb.js';
+import { type CfbFile, readCfb } from '@mirrorz/formats';
 import { VbaCompressionError, decompress } from './compression.js';
 
 /** Raised when the container is not a VBA project at all. */
@@ -426,6 +426,7 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
 
   let pendingReferenceName: Uint8Array | undefined;
   let moduleCount = 0;
+  let sawModulesRecord = false;
 
   try {
     walk: while (cursor.remaining >= 2) {
@@ -532,9 +533,15 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
             cursor.u16();
             cursor.skip(cursor.u32());
           }
+          sawModulesRecord = true;
           break walk;
         }
         case ID_DIR_TERMINATOR:
+          // The terminator is Id plus a four byte reserved field. Consuming
+          // only the identifier would leave those four bytes to be read as the
+          // start of a module, which produces two invented warnings on a file
+          // that is in fact perfectly well formed.
+          cursor.skip(Math.min(4, cursor.remaining));
           break walk;
         default:
           warnings.push(`dir: skipped unknown record 0x${id.toString(16).padStart(4, '0')}`);
@@ -544,8 +551,10 @@ function parseDirStream(data: Uint8Array, warnings: string[]): DirStream {
     }
 
     // Modules run until the dir terminator; the declared count is treated as a
-    // sanity bound rather than gospel because a truncated file will lie.
-    modules: while (cursor.remaining >= 2) {
+    // sanity bound rather than gospel because a truncated file will lie. A
+    // stream that ended at the terminator without a PROJECTMODULES record has
+    // no module array at all, and whatever follows is not one.
+    modules: while (sawModulesRecord && cursor.remaining >= 2) {
       const first = cursor.peek16();
       if (first === ID_DIR_TERMINATOR || first === undefined) break;
       const module: RawModule = {
@@ -820,7 +829,7 @@ function decodeObfuscated(
   return decoded;
 }
 
-function readProtection(properties: VbaProjectProperties): VbaProtection {
+function readProtection(properties: VbaProjectProperties, warnings: string[]): VbaProtection {
   const protection: VbaProtection = {
     userProtected: false,
     hostProtected: false,
@@ -828,27 +837,46 @@ function readProtection(properties: VbaProjectProperties): VbaProtection {
     passwordSet: false,
   };
 
-  const cmg = properties.entries.find(([key]) => key === 'CMG')?.[1];
-  if (cmg !== undefined) {
-    const blob = hexToBytes(cmg);
-    const decoded = blob === undefined ? undefined : decodeObfuscated(blob, true);
-    const data = decoded?.data;
-    if (data !== undefined && data.length >= 1) {
-      const flags = data[0]!;
-      protection.userProtected = (flags & 0x01) !== 0;
-      protection.hostProtected = (flags & 0x02) !== 0;
-      protection.vbeProtected = (flags & 0x04) !== 0;
+  // A blob we cannot read is reported. Failing quietly here fails open: an
+  // unreadable CMG would otherwise mean "not protected", and the source of a
+  // project whose author asked for it to be locked would be handed over on the
+  // strength of a field we could not parse.
+  const decode = (key: string, wantData: boolean) => {
+    const value = properties.entries.find(([name]) => name === key)?.[1];
+    if (value === undefined) return undefined;
+    const blob = hexToBytes(value);
+    const decoded = blob === undefined ? undefined : decodeObfuscated(blob, wantData);
+    if (decoded === undefined) {
+      warnings.push(`${key} is not a readable encrypted structure; protection state unknown`);
+      return undefined;
     }
+    // Section 2.4.3.2: Version MUST be 2. Anything else means we have not in
+    // fact decrypted this, and its bits are not protection flags.
+    if (decoded.version !== 2) {
+      warnings.push(`${key} decrypted to version ${decoded.version}, expected 2`);
+      return undefined;
+    }
+    return decoded;
+  };
+
+  const cmg = decode('CMG', true);
+  const data = cmg?.data;
+  if (cmg !== undefined && (data === undefined || data.length < 1)) {
+    warnings.push('CMG carries no protection state word');
+  }
+  if (data !== undefined && data.length >= 1) {
+    // ProjectProtectionState, section 2.3.1.15: a little-endian 32-bit word
+    // whose three lowest bits are fUserProtected, fHostProtected, fVBEProtected.
+    const flags = data[0]!;
+    protection.userProtected = (flags & 0x01) !== 0;
+    protection.hostProtected = (flags & 0x02) !== 0;
+    protection.vbeProtected = (flags & 0x04) !== 0;
   }
 
-  const dpb = properties.entries.find(([key]) => key === 'DPB')?.[1];
-  if (dpb !== undefined) {
-    const blob = hexToBytes(dpb);
-    const decoded = blob === undefined ? undefined : decodeObfuscated(blob, false);
-    // An unprotected project still writes a DPB: one byte of 0x00. Anything
-    // longer is a password, either in the clear or hashed, and we do not look.
-    if (decoded !== undefined && decoded.dataLength > 1) protection.passwordSet = true;
-  }
+  // An unprotected project still writes a DPB: one byte of 0x00. Anything
+  // longer is a password, either in the clear or hashed, and we do not look.
+  const dpb = decode('DPB', false);
+  if (dpb !== undefined && dpb.dataLength > 1) protection.passwordSet = true;
 
   return protection;
 }
@@ -898,7 +926,7 @@ export function parseVbaProject(bytes: Uint8Array, options: ParseVbaProjectOptio
     projectBytes === undefined ? '' : decodeText(projectBytes, dir.codePage, warnings),
   );
 
-  const protection = readProtection(properties);
+  const protection = readProtection(properties, warnings);
   const isProtected =
     protection.userProtected ||
     protection.hostProtected ||

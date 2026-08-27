@@ -124,8 +124,10 @@ export class AppController {
     this.now = options.now ?? (() => Date.now());
     this.entryOptions = options.entryOptions ?? {};
 
-    const first = doc.workbook.sheets[0];
-    if (!first) doc.addSheet('Sheet1', undefined, { label: 'New workbook', origin: 'system' });
+    // Directly on the workbook, not through the log: an empty workbook's first
+    // sheet is initial state, and logging it would make jumping to the start of
+    // the history delete the sheet the user is looking at.
+    if (!doc.workbook.sheets[0]) doc.workbook.addSheet('Sheet1');
     const activeSheet = doc.workbook.sheets[0]!.name;
 
     this.snapshot = {

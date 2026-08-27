@@ -97,7 +97,7 @@ function serialFromScalar(s: Scalar, ctx: FunctionContext): number | CellError {
   const system = ctx.dateSystem;
   if (typeof s === 'string') {
     const parsed = parseDateTimeText(s, ctx);
-    if (parsed !== undefined) return checkSerial(parsed.serial, system);
+    if (parsed !== undefined) return checkSerial(parsed.dateSerial + parsed.timeFraction, system);
     const n = parseNumericText(s);
     if (n === undefined) return CellError.VALUE;
     return checkSerial(n, system);
@@ -206,10 +206,18 @@ function isLastDayOfFebruary(d: Ymd, system: DateSystem): boolean {
 // Date and time text
 // ---------------------------------------------------------------------------
 
+/**
+ * The date and time halves are kept apart rather than pre-added, so TIMEVALUE
+ * can hand back the exact fraction it parsed. Adding 0.5732638888888889 to
+ * 45352 and subtracting the day again loses four digits, which is visible
+ * against Excel.
+ */
 interface ParsedText {
-  serial: number;
+  /** Whole days, or 0 when the text carried no date. */
+  dateSerial: number;
+  /** Time of day as a fraction of a day. */
+  timeFraction: number;
   hasDate: boolean;
-  hasTime: boolean;
 }
 
 const MONTH_NAMES = [
@@ -361,13 +369,13 @@ function parseDateTimeText(raw: string, ctx: FunctionContext): ParsedText | unde
 
   text = text.replaceAll(',', ' ').replace(/\s+/g, ' ').trim();
   if (text === '') {
-    return hasTime ? { serial: timeFraction, hasDate: false, hasTime } : undefined;
+    return hasTime ? { dateSerial: 0, timeFraction, hasDate: false } : undefined;
   }
 
   const defaultYear = ymd(Math.floor(ctx.now), system).year;
   const date = parseDatePart(text, system, defaultYear);
   if (date === undefined) return undefined;
-  return { serial: date + timeFraction, hasDate: true, hasTime };
+  return { dateSerial: date, timeFraction, hasDate: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +689,7 @@ const DATEVALUE: FunctionSpec = {
     if (typeof s !== 'string') return CellError.VALUE;
     const parsed = parseDateTimeText(s, ctx);
     if (parsed === undefined || !parsed.hasDate) return CellError.VALUE;
-    return checkSerial(Math.floor(parsed.serial), ctx.dateSystem);
+    return checkSerial(parsed.dateSerial, ctx.dateSystem);
   },
 };
 
@@ -697,7 +705,7 @@ const TIMEVALUE: FunctionSpec = {
     const parsed = parseDateTimeText(s, ctx);
     if (parsed === undefined) return CellError.VALUE;
     // Date information in the text is ignored rather than rejected.
-    return parsed.serial - Math.floor(parsed.serial);
+    return parsed.timeFraction % 1;
   },
 };
 

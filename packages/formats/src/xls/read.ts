@@ -14,12 +14,14 @@
 
 import {
   type CellData,
+  type CellStyle,
   Workbook,
   errorFromCode,
   parseRangeRef,
   type Scalar,
 } from '@mirrorz/core';
 import { type CfbFile, looksLikeCfb, readCfb } from '../cfb.js';
+import { builtinFormatCode } from '../numfmt.js';
 import {
   type BiffRecord,
   BIFF8_VERSION,
@@ -74,9 +76,8 @@ export function readXls(bytes: Uint8Array): XlsReadResult {
   }
 
   const warnings: string[] = [];
-  const globals = readGlobals(records, warnings);
-
   const workbook = new Workbook();
+  const globals = readGlobals(records, warnings, workbook);
   workbook.dateSystem = globals.date1904 ? 1904 : 1900;
 
   // Sheets are addressed by byte offset into the stream, so records are re-read
@@ -108,6 +109,9 @@ export function readXls(bytes: Uint8Array): XlsReadResult {
 }
 
 interface Globals {
+  workbook: Workbook;
+  /** XF index -> interned StyleId; -1 records "nothing worth interning". */
+  styleIds: Map<number, number>;
   sharedStrings: string[];
   /** Custom number-format codes by their FORMAT index. */
   formats: Map<number, string>;
@@ -117,8 +121,10 @@ interface Globals {
   date1904: boolean;
 }
 
-function readGlobals(records: BiffRecord[], warnings: string[]): Globals {
+function readGlobals(records: BiffRecord[], warnings: string[], workbook: Workbook): Globals {
   const globals: Globals = {
+    workbook,
+    styleIds: new Map(),
     sharedStrings: [],
     formats: new Map(),
     xfs: [],
@@ -342,6 +348,14 @@ function readWorksheet(
         if ((flags & 0x0001) !== 0) props.hidden = true;
         const level = (flags >> 8) & 0x07;
         if (level > 0) props.level = level;
+        // A run spanning essentially the whole grid is the sheet's default
+        // width, not per-column formatting. Materialising it would create 256
+        // column records and inflate the used range to the full BIFF8 width.
+        const BIFF8_LAST_COLUMN = 255;
+        if (firstCol === 0 && lastCol >= BIFF8_LAST_COLUMN) {
+          if (props.width !== undefined) target.defaultColWidth = props.width;
+          break;
+        }
         const limit = Math.min(lastCol, firstCol + 1024);
         for (let col = firstCol; col <= limit; col++) target.cols.set(col, { ...props });
         break;
@@ -408,11 +422,13 @@ function readWorksheet(
 }
 
 /**
- * Store a value, carrying its number format across.
+ * Store a value, interning its format into the workbook's style table.
  *
- * BIFF8 has no style table in our sense, so the XF's format code is interned
- * into the workbook style table on demand. That keeps date-formatted cells
- * rendering as dates rather than as bare serial numbers.
+ * BIFF8 has no style table in our sense: a cell points at an XF record, which
+ * points at a format code. `CellData.style` means an id in the workbook's own
+ * StyleTable everywhere else in the codebase, so the XF has to be translated
+ * rather than have its index stored - putting a BIFF index in that field would
+ * resolve to an unrelated style and render the cell wrongly.
  */
 function setCell(
   sheet: import('@mirrorz/core').Sheet,
@@ -422,18 +438,54 @@ function setCell(
   xfIndex: number,
   globals: Globals,
 ): void {
+  const style = internXf(xfIndex, globals);
+  // A blank cell is only worth storing when it carries real formatting.
+  // Materialising every blank cell that merely has the default XF inflates the
+  // used range to the full BIFF8 grid, which is both wrong and expensive.
+  if (value === null && style === undefined) return;
+
   const data: CellData = { value };
-  const xf = globals.xfs[xfIndex];
-  if (xf) {
-    const code = globals.formats.get(xf.formatIndex);
-    if (code !== undefined) {
-      // The style is interned lazily by the caller's workbook; here we record
-      // the format id so the reader's caller can resolve it.
-      data.style = xf.formatIndex;
-    }
-  }
-  if (value === null && data.style === undefined) return;
+  if (style !== undefined) data.style = style;
   sheet.setCell(row, col, data);
+}
+
+/** Translate a BIFF XF index into a workbook StyleId, memoised. */
+function internXf(xfIndex: number, globals: Globals): number | undefined {
+  const cached = globals.styleIds.get(xfIndex);
+  if (cached !== undefined) return cached === -1 ? undefined : cached;
+
+  const xf = globals.xfs[xfIndex];
+  if (!xf) return undefined;
+
+  const numFmt = globals.formats.get(xf.formatIndex) ?? builtinFormatCode(xf.formatIndex);
+  const alignment = alignmentOf(xf);
+  // Nothing worth recording: leave the cell on the default style rather than
+  // interning an empty one for every cell in the file.
+  if (numFmt === undefined && alignment === undefined) {
+    globals.styleIds.set(xfIndex, -1);
+    return undefined;
+  }
+
+  const id = globals.workbook.styles.intern({
+    numFmtId: xf.formatIndex,
+    ...(numFmt === undefined ? {} : { numFmt }),
+    ...(alignment === undefined ? {} : { alignment }),
+  });
+  globals.styleIds.set(xfIndex, id);
+  return id;
+}
+
+const HORIZONTAL = ['general', 'left', 'center', 'right', 'fill', 'justify', 'centerContinuous', 'distributed'] as const;
+const VERTICAL = ['top', 'center', 'bottom', 'justify', 'distributed'] as const;
+
+function alignmentOf(xf: ReturnType<typeof readXf>): CellStyle['alignment'] | undefined {
+  const horizontal = HORIZONTAL[xf.horizontal];
+  const vertical = VERTICAL[xf.vertical];
+  const out: NonNullable<CellStyle['alignment']> = {};
+  if (horizontal && horizontal !== 'general') out.horizontal = horizontal;
+  if (vertical && vertical !== 'bottom') out.vertical = vertical;
+  if (xf.wrap) out.wrapText = true;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** Locate the VBA project inside an .xls, which stores it in the same container. */

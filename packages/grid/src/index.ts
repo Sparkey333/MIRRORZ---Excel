@@ -390,11 +390,9 @@ export class GridView {
     if (this.dragging === 'cells' && target.kind === 'cell') {
       this.selection.extendTo(target.row, target.col);
     } else if (this.dragging === 'rows' && (target.kind === 'row-header' || target.kind === 'cell')) {
-      const row = target.kind === 'row-header' ? target.row : target.row;
-      this.selection.selectRow(row, { extend: true });
+      this.selection.selectRow(target.row, { extend: true });
     } else if (this.dragging === 'cols' && (target.kind === 'col-header' || target.kind === 'cell')) {
-      const col = target.kind === 'col-header' ? target.col : target.col;
-      this.selection.selectCol(col, { extend: true });
+      this.selection.selectCol(target.col, { extend: true });
     }
   }
 

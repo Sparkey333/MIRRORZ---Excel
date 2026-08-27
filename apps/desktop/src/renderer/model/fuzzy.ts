@@ -35,6 +35,8 @@ const SCORE_CASE_MATCH = 3;
 const PENALTY_LEADING = 2;
 const PENALTY_GAP = 3;
 const MAX_LEADING_PENALTY = 20;
+/** How far past a first hit to keep looking for one at a word boundary. */
+const LOOKAHEAD = 8;
 
 /**
  * Score `query` against `target`.
@@ -59,6 +61,10 @@ export function fuzzyMatch(query: string, target: string): FuzzyMatch | null {
     const ch = q[qi]!;
     let found = -1;
     for (let i = ti; i < t.length; i++) {
+      // Once something is found, only look a little way ahead for a better
+      // occurrence. Scanning the whole string would let a distant word-start
+      // match steal a character the rest of the query still needs.
+      if (found >= 0 && i > found + LOOKAHEAD) break;
       if (t[i] !== ch) continue;
       if (found < 0) found = i;
       // A later occurrence that starts a word beats an earlier one buried
@@ -67,9 +73,6 @@ export function fuzzyMatch(query: string, target: string): FuzzyMatch | null {
         found = i;
         break;
       }
-      // Only look a little way ahead; scanning the whole string for a boundary
-      // would let a distant match win over an obviously adjacent one.
-      if (i > found + 8) break;
     }
     if (found < 0) return null;
     positions.push(found);

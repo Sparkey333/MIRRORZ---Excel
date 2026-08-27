@@ -747,16 +747,13 @@ function collectSpans(
   let i = axis.firstVisibleAtOrAfter(Math.max(0, from));
   if (i >= axis.count) return spans;
   let pos = positionOf(i);
-  while (pos < bandEnd && i < axis.count) {
+  while (pos < bandEnd) {
+    // firstVisibleAtOrAfter guarantees a non-zero size, so pos strictly grows
+    // and the loop is bounded by the band width, never by the axis length.
     const size = axis.sizeOf(i);
-    if (size > 0) {
-      spans.push({ index: i, start: pos, size });
-      pos += size;
-      i++;
-      i = axis.firstVisibleAtOrAfter(i);
-    } else {
-      i = axis.firstVisibleAtOrAfter(i + 1);
-    }
+    spans.push({ index: i, start: pos, size });
+    pos += size;
+    i = axis.firstVisibleAtOrAfter(i + 1);
     if (i >= axis.count) break;
   }
   return spans;

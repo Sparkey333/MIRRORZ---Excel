@@ -225,6 +225,8 @@ interface ProjectSpec {
   omitProjectStream?: boolean;
   declaredModuleCount?: number;
   extraRecords?: number[];
+  /** Leave out PROJECTMODULES, so the stream runs straight to the terminator. */
+  omitModulesRecord?: boolean;
   truncateDir?: number;
   compressDir?: boolean;
   moduleData?: (module: ModuleSpec, source: Uint8Array) => Uint8Array | undefined;
@@ -275,8 +277,10 @@ function dirStream(spec: ProjectSpec): Uint8Array {
 
   if (spec.extraRecords !== undefined) bytes.push(...spec.extraRecords);
 
-  bytes.push(...record(0x000f, u16(spec.declaredModuleCount ?? modules.length)));
-  bytes.push(...record(0x0013, u16(0xbeef)));
+  if (spec.omitModulesRecord !== true) {
+    bytes.push(...record(0x000f, u16(spec.declaredModuleCount ?? modules.length)));
+    bytes.push(...record(0x0013, u16(0xbeef)));
+  }
 
   for (const module of modules) {
     bytes.push(...record(0x0019, cp1252(module.name)));
@@ -634,11 +638,31 @@ describe('parseVbaProject: protection', () => {
     expect(project.protected).toBe(true);
   });
 
-  it('treats an unparsable protection blob as unprotected rather than failing', () => {
+  it('treats an unparsable protection blob as unprotected but says so', () => {
     const project = parseVbaProject(
       buildProject({ modules: [HELLO], projectStream: 'CMG="not hex"\r\nDPB="0E0C"\r\n' }),
     );
     expect(project.protected).toBe(false);
+    // Falling back to "unprotected" without a word would fail open: a CMG we
+    // could not read must not silently become permission to show the source.
+    expect(project.warnings.join(' ')).toContain('CMG is not a readable encrypted structure');
+    expect(project.warnings.join(' ')).toContain('DPB is not a readable encrypted structure');
+  });
+
+  it('warns when a protection blob decrypts to a version other than 2', () => {
+    // Section 2.4.3.2: Version MUST be 2. A different value means the bytes are
+    // not an Encrypted Data Structure and its low bits are not protection flags.
+    const wrongVersion = obfuscate([0x01, 0, 0, 0], 0x07).split('');
+    // Flip the VersionEnc byte, which is the second byte of the blob.
+    wrongVersion[2] = '9';
+    const project = parseVbaProject(
+      buildProject({
+        modules: [HELLO],
+        projectStream: `Name="X"\r\nCMG="${wrongVersion.join('')}"\r\n`,
+      }),
+    );
+    expect(project.warnings.join(' ')).toMatch(/CMG decrypted to version/);
+    expect(project.protection.userProtected).toBe(false);
   });
 
   it('treats a project with no CMG or DPB at all as unprotected', () => {
@@ -816,6 +840,16 @@ describe('parseVbaProject: malformed input', () => {
     );
     // The dir terminator is consumed as part of the unterminated module, so the
     // module list may be empty; what matters is that nothing threw.
+    expect(project.projectName).toBe('VBAProject');
+  });
+
+  it('does not invent module records out of the dir terminator', () => {
+    // The terminator is an identifier plus four reserved bytes. A parser that
+    // consumes only the identifier reads the reserved bytes as the start of a
+    // module and reports two failures for a stream that is entirely well formed.
+    const project = parseVbaProject(buildProject({ modules: [], omitModulesRecord: true }));
+    expect(project.warnings).toEqual([]);
+    expect(project.modules).toEqual([]);
     expect(project.projectName).toBe('VBAProject');
   });
 
