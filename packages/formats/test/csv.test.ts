@@ -135,6 +135,17 @@ describe('RFC 4180 quoting', () => {
     expect(fields('"line1\rline2"')).toEqual([['line1\nline2']]);
   });
 
+  it('does not let a CR swallow a newline that is not its own', () => {
+    // Only the LF immediately after a CR is that CR's other half. Here a
+    // doubled quote sits between them, so they are two separate line breaks and
+    // the second one must survive.
+    expect(fields('"a\r""b""\nc"')).toEqual([['a\n"b"\nc']]);
+    expect(fields('"a\r"",\nb"')).toEqual([['a\n",\nb']]);
+    // The genuine CRLF pair still collapses to one break.
+    expect(fields('"a\r\nb"')).toEqual([['a\nb']]);
+    expect(fields('"a\r\r\nb"')).toEqual([['a\n\nb']]);
+  });
+
   it('keeps leading and trailing spaces inside quotes', () => {
     expect(fields('"  padded  ",x')).toEqual([['  padded  ', 'x']]);
   });
@@ -252,6 +263,10 @@ describe('streaming', () => {
 
   it('survives a split between CR and LF', () => {
     expect(collect(['a\r', '\nb'])).toEqual([['a'], ['b']]);
+  });
+
+  it('keeps a quoted CR and a later LF apart across a chunk boundary', () => {
+    expect(collect(['"a\r', '""b\n', 'c"'])).toEqual([['a\n"b\nc']]);
   });
 
   it('stops when the sink asks it to', () => {

@@ -1334,7 +1334,7 @@ const ARRAYTOTEXT: FunctionSpec = {
     const strict = mode === 1;
 
     const arg = args[0];
-    if (!isArray(arg)) return strict ? renderScalar((arg ?? null) as Scalar, true) : renderScalar((arg ?? null) as Scalar, false);
+    if (!isArray(arg)) return renderScalar((arg ?? null) as Scalar, strict);
 
     const a = arg as ArrayValue;
     if (!strict) {

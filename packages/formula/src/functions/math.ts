@@ -700,7 +700,9 @@ const AGGREGATE: FunctionSpec = {
     if (fn >= 14) {
       if (rest.length < 2) return CellError.VALUE;
       const n = toNumber(anyScalarArg(rest[rest.length - 1], ctx));
-      if (isError(n)) return ignoreErrors ? CellError.VALUE : n;
+      // k is a plain argument, not part of the data, so the ignore-errors
+      // options never apply to it.
+      if (isError(n)) return n;
       k = n;
       data = rest.slice(0, -1);
     }

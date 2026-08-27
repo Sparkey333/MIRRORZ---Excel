@@ -329,6 +329,14 @@ export class CsvRowParser {
     }
 
     if (this.inQuotes) {
+      // Only the LF *immediately* after a CR is that CR's other half, so the
+      // flag is cleared by every character and set again by a CR. Letting it
+      // survive anything else swallows a real newline: in `"a\r""b\nc"` the
+      // doubled quote sits between the CR and the LF, and they are two separate
+      // line breaks.
+      const afterCR = this.quotedCR;
+      this.quotedCR = false;
+
       if (this.pendingQuote) {
         this.pendingQuote = false;
         if (ch === QUOTE) {
@@ -351,14 +359,10 @@ export class CsvRowParser {
           return;
         }
         if (ch === '\n') {
-          if (this.quotedCR) {
-            this.quotedCR = false;
-            return;
-          }
+          if (afterCR) return;
           this.field += '\n';
           return;
         }
-        this.quotedCR = false;
         this.field += ch;
         return;
       }

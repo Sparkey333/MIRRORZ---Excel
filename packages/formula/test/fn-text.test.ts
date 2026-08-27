@@ -15,7 +15,7 @@ import { readXlsx } from '../../formats/src/xlsx/read.js';
 import { Evaluator, type SheetStore } from '../src/evaluator.js';
 import { parseFormula } from '../src/parser.js';
 import { FunctionRegistry } from '../src/registry.js';
-import { TEXT_FUNCTIONS } from '../src/functions/text.js';
+import { TEXT_FUNCTIONS, setTextFormatter } from '../src/functions/text.js';
 import { type ArrayValue, type Value, isArray } from '../src/value.js';
 
 const FIXTURES = new URL('../../../fixtures/generated/', import.meta.url);
@@ -562,7 +562,16 @@ describe('TEXT', () => {
   });
 
   it('rejects a negative serial in a date format', () => {
+    // There is no date before the epoch to render, so the date branch reports
+    // the same error Excel does for an out-of-range serial.
     expect(code(calc('TEXT(-1,"yyyy")'))).toBe('#VALUE!');
+    expect(code(calc('TEXT(-1,"mmm d")'))).toBe('#VALUE!');
+  });
+
+  it('keeps very large and very small magnitudes intact', () => {
+    expect(calc('TEXT(1E20,"0")')).toBe('100000000000000000000');
+    expect(calc('TEXT(1E-20,"0.00")')).toBe('0.00');
+    expect(calc('TEXT(0.000001,"0.000000")')).toBe('0.000001');
   });
 
   it('falls back to the General rendering', () => {
@@ -717,6 +726,45 @@ describe('the REGEX family', () => {
 
   it('reports a malformed pattern as #VALUE!', () => {
     expect(code(calc('REGEXTEST("a","(")'))).toBe('#VALUE!');
+  });
+});
+
+describe('the injected-formatter seam', () => {
+  it('hands TEXT over to the full engine once one is supplied', () => {
+    setTextFormatter((value, formatCode, dateSystem) => `${String(value)}|${formatCode}|${dateSystem}`);
+    try {
+      expect(calc('TEXT(5,"0.00")')).toBe('5|0.00|1900');
+    } finally {
+      setTextFormatter(undefined);
+    }
+    // Removing it restores the local subset.
+    expect(calc('TEXT(5,"0.00")')).toBe('5.00');
+  });
+});
+
+describe('boundary magnitudes', () => {
+  it('holds text right up to the cell limit and refuses one character more', () => {
+    expect(calc('LEN(REPT("a",32767))')).toBe(32767);
+    expect(code(calc('REPT("a",32768)'))).toBe('#VALUE!');
+  });
+
+  it('accepts an enormous count without allocating past the source', () => {
+    expect(calc('MID("abc",1,1000000000)')).toBe('abc');
+    expect(calc('LEFT("abc",1000000000)')).toBe('abc');
+  });
+
+  it('coerces numeric arguments to text before searching', () => {
+    expect(calc('FIND(2,123)')).toBe(2);
+    expect(calc('SEARCH(2,123)')).toBe(2);
+  });
+
+  it('folds case beyond ASCII in SEARCH', () => {
+    expect(calc('SEARCH("É","xéy")')).toBe(2);
+  });
+
+  it('rejects more than 127 decimal places', () => {
+    expect(code(calc('FIXED(1,128)'))).toBe('#VALUE!');
+    expect(code(calc('DOLLAR(1,128)'))).toBe('#VALUE!');
   });
 });
 

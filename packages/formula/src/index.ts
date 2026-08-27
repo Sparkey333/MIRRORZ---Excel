@@ -7,4 +7,5 @@ export * from './registry.js';
 export * from './evaluator.js';
 export * from './store.js';
 export * from './graph.js';
+export * from './engine.js';
 export { createRegistry, ALL_FUNCTIONS } from './functions/index.js';
