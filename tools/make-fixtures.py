@@ -459,6 +459,71 @@ def _soffice(args: list, timeout: int = 240) -> None:
     )
 
 
+
+def precedence(path: Path) -> dict:
+    """Operator-precedence and numeric-fidelity cases.
+
+    These are the behaviours where Excel deliberately departs from mathematical
+    convention and from IEEE-754, so they must be verified against a real
+    implementation rather than assumed. LibreOffice matches Excel here.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Precedence"
+    cases = [
+        # Exponentiation is LEFT-associative in Excel: 2^3^2 is (2^3)^2 = 64.
+        ("pow_assoc", "=2^3^2"),
+        # Unary minus binds tighter than ^: -2^2 is (-2)^2 = 4.
+        ("unary_pow", "=-2^2"),
+        ("unary_pow_paren", "=-(2^2)"),
+        ("pow_then_mul", "=2*3^2"),
+        ("percent_pow", "=2^2%"),
+        ("unary_chain", "=--3"),
+        ("mul_div_left", "=100/10/2"),
+        ("sub_left", "=10-3-2"),
+        ("concat_vs_compare", '="a"&"b"="ab"'),
+        ("compare_lowest", "=1+1=2"),
+        ("neg_percent", "=-50%"),
+        ("percent_of_sum", "=(1+1)%"),
+        # Numeric fidelity: Excel displays and compares at 15 significant digits.
+        ("float_add", "=0.1+0.2"),
+        ("float_eq", "=0.1+0.2=0.3"),
+        ("float_cancel", "=(0.5-0.4-0.1)"),
+        ("float_cancel_eq", "=(0.5-0.4-0.1)=0"),
+        ("big_int", "=9007199254740993"),
+        ("sig15", "=1/3"),
+        ("round_half", "=ROUND(2.5,0)"),
+        ("round_half_neg", "=ROUND(-2.5,0)"),
+        ("banker_check", "=ROUND(0.5,0)"),
+        # Coercion rules.
+        ("text_num_add", '="1"+1'),
+        ("bool_add", "=TRUE+1"),
+        ("bool_compare", "=TRUE>1"),
+        ("text_gt_num", '="a">1'),
+        ("blank_add", "=Z99+1"),
+        ("blank_concat", '=Z99&"x"'),
+        ("empty_compare", '=Z99=""'),
+        ("empty_zero", "=Z99=0"),
+        # Range operators.
+        # The reference block lives in F40:H45, well clear of the case rows.
+        ("range_op", "=SUM(F40:F42)"),
+        ("intersect_op", "=SUM(F40:H42 G40:G45)"),
+        ("union_op", "=SUM((F40:F41,F42:F43))"),
+    ]
+    for i in range(40, 46):
+        for j, col in enumerate("FGH"):
+            ws[f"{col}{i}"] = i + j
+
+    ws["A1"], ws["B1"], ws["C1"] = "case", "text", "result"
+    for i, (name, formula) in enumerate(cases, start=2):
+        ws.cell(row=i, column=1, value=name)
+        ws.cell(row=i, column=2, value=formula.replace("=", "'=", 1))
+        ws.cell(row=i, column=3, value=xlfn(formula))
+    wb.save(path)
+    return {"sheets": ["Precedence"], "cases": len(cases),
+            "focus": "operator precedence quirks, numeric fidelity, coercion, range operators"}
+
+
 CONVERSIONS = [
     ("xls", "MS Excel 97"),
     ("ods", "calc8"),
@@ -511,6 +576,7 @@ BUILDERS = {
     "styling": styling,
     "features": features,
     "edge-cases": edge_cases,
+    "precedence": precedence,
 }
 
 
