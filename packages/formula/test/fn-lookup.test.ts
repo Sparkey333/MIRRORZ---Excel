@@ -283,6 +283,16 @@ describe('LOOKUP', () => {
     expect(run('LOOKUP(2,G1:I2)')).toBe('y');
   });
 
+  it('searches the first column of a square array, as Microsoft documents', () => {
+    // "If array covers an area that is wider than it is tall (more columns than
+    // rows), LOOKUP searches for lookup_value in the first row. If array is
+    // square or is taller than it is wide, LOOKUP searches in the first
+    // column." A1:B2 is square, so 2 is found in A2 and B2 comes back. Reading
+    // a square array by rows instead would find the 1 in A1 and answer 2.
+    expect(run('LOOKUP(2,A1:B2)')).toBe('b');
+    expect(run('LOOKUP(1,A1:B2)')).toBe('a');
+  });
+
   it('has no exact mode, so a miss still returns the nearest below', () => {
     expect(run('LOOKUP("bb",C1:C3)')).toBe('banana');
   });
@@ -456,10 +466,15 @@ describe('INDIRECT', () => {
     expect(run('INDIRECT("A1048577")')).toEqual(CellError.REF);
   });
 
-  it('reads a whole column', () => {
+  it('reads a whole column, clipped exactly as the same text typed directly is', () => {
+    // The engine clips a whole-column reference to the used range rather than
+    // materialising 1,048,576 rows; INDIRECT has to agree, or A:A and
+    // INDIRECT("A:A") are two different ranges spelled the same way.
     const ref = shape('INDIRECT("A:A")');
     expect(isRef(ref)).toBe(true);
-    expect(ref).toMatchObject({ sheet: 'S', startRow: 0, startCol: 0, endCol: 0 });
+    expect(ref).toEqual(shape('A:A'));
+    expect(ref).toEqual(makeRef('S', 0, 0, 4, 0));
+    expect(run('ROWS(INDIRECT("A:A"))')).toBe(run('ROWS(A:A)'));
   });
 
   it('is volatile', () => {
@@ -532,6 +547,11 @@ describe('ROW, COLUMN, ROWS, COLUMNS', () => {
   });
 
   it('counts a whole column against the used range, not the sheet limit', () => {
+    // A deliberate engine-wide divergence, not a lookup decision: Excel answers
+    // 1048576 here, and the evaluator clips every whole-column reference to the
+    // used range so that summing one does not materialise a million cells. The
+    // number below is therefore the engine's, and the point of asserting it is
+    // that INDIRECT above gives the same answer.
     expect(run('ROWS(A:A)')).toBe(5);
   });
 
@@ -638,7 +658,18 @@ describe('FORMULATEXT and HYPERLINK', () => {
   it('shows the friendly name, or the location when there is none', () => {
     expect(run('HYPERLINK("http://example.com","click")')).toBe('click');
     expect(run('HYPERLINK("http://example.com")')).toBe('http://example.com');
-    expect(run('HYPERLINK("http://example.com",42)')).toBe('42');
+  });
+
+  it('returns the friendly name as a value, not as text', () => {
+    // Microsoft calls friendly_name "the jump text or numeric value that is
+    // displayed in the cell", and documents HYPERLINK("...",12345) as
+    // displaying the number. Stringifying here would make the result of a
+    // HYPERLINK cell text for every formula that reads it.
+    expect(run('HYPERLINK("http://example.com",42)')).toBe(42);
+    expect(run('HYPERLINK("http://example.com",TRUE)')).toBe(true);
+    // A blank friendly name displays as zero, as a blank reference does anywhere
+    // a value is wanted.
+    expect(run('HYPERLINK("http://example.com",Z50)')).toBe(0);
   });
 });
 

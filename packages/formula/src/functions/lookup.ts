@@ -54,8 +54,24 @@
  *
  * INDIRECT parses its text with the real formula parser rather than a private
  * regular expression, so `Data!$D$2`, `A:A` and `'My Sheet'!A1:B2` all resolve
- * exactly as they would if typed. R1C1 text is rewritten to A1 first, which
- * keeps one parser rather than two.
+ * exactly as they would if typed - including the evaluator's clipping of a
+ * whole column to the used range, so that `A:A` and INDIRECT("A:A") are one
+ * range and not two. R1C1 text is rewritten to A1 first, which keeps one parser
+ * rather than two.
+ *
+ * Two things INDIRECT still cannot reach, both because the resolution lives
+ * above this module rather than because the answer is unknown:
+ *
+ *   A defined name is #REF!. The evaluator resolves `=MyName` through
+ *   EvaluatorStore.getDefinedName with a depth counter for self-reference;
+ *   FunctionContext does not expose it, and a second, guard-less copy of that
+ *   resolver here would be worse than the honest error. Excel resolves names,
+ *   so this is a gap, not a decision.
+ *
+ *   A whole-row text, INDIRECT("1:1"), is #REF!, because the parser has no row
+ *   beam: it reads `1:1` as a range operator over two numbers. The col beam
+ *   below is reachable and the row beam is not, and the fix belongs in the
+ *   parser.
  */
 
 import {
@@ -713,12 +729,18 @@ function refFromAst(node: Ast, ctx: FunctionContext): RefValue | CellError {
       if (!ctx.hasSheet(sheet)) return CellError.REF;
       const from = Math.min(node.from, node.to);
       const to = Math.max(node.from, node.to);
+      // Clipped to the used extent, because the evaluator clips the same syntax
+      // typed directly. INDIRECT("A:A") and A:A name one range, so they must
+      // measure one size; leaving this at the sheet limit made ROWS(A:A) five
+      // and ROWS(INDIRECT("A:A")) 1,048,576, and handed every function that
+      // dereferences the result a dense million-cell array to read five values.
+      const bounds = ctx.usedBounds(sheet);
       if (node.axis === 'col') {
         if (from < 0 || to >= MAX_COLS) return CellError.REF;
-        return makeRef(sheet, 0, from, MAX_ROWS - 1, to);
+        return makeRef(sheet, 0, from, bounds?.maxRow ?? 0, to);
       }
       if (from < 0 || to >= MAX_ROWS) return CellError.REF;
-      return makeRef(sheet, from, 0, to, MAX_COLS - 1);
+      return makeRef(sheet, from, 0, to, bounds?.maxCol ?? 0);
     }
     default:
       // Defined names would need the workbook's name table, which the function
@@ -903,8 +925,17 @@ const HYPERLINK: FunctionSpec = {
   impl: (args, ctx) => {
     // The jump target is a display concern; the cell shows the friendly name, or
     // the location itself when none was given.
+    //
+    // The value is returned as it arrived rather than as text. Microsoft
+    // describes friendly_name as "the jump text or numeric value that is
+    // displayed in the cell", and HYPERLINK("http://example.org",12345) displays
+    // the number 12345, not the string "12345"; coercing here would make
+    // ISNUMBER(HYPERLINK(...)) false and turn a logical friendly name into the
+    // text "TRUE".
     const shown = args[1] === undefined ? scalarOf(args[0], ctx) : scalarOf(args[1], ctx);
-    return toText(shown);
+    // A blank friendly name displays as zero, the way a blank reference does
+    // anywhere else a value is wanted.
+    return shown === null ? 0 : shown;
   },
 };
 

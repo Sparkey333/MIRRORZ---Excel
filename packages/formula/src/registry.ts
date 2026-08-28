@@ -63,6 +63,13 @@ export interface FunctionContext {
   hasSheet(name: string): boolean;
   /** Sheet names in tab order, for SHEET, SHEETS and 3-D references. */
   sheetNames(): readonly string[];
+  /**
+   * The extent a sheet actually occupies, or null when it is empty. A function
+   * that builds a whole-column or whole-row reference must clip to this, the
+   * same way the evaluator clips `A:A`, or it hands the rest of the engine a
+   * reference over a million rows that were never written.
+   */
+  usedBounds(sheet: string): { maxRow: number; maxCol: number } | null;
   /** The workbook's date system, needed by every date function. */
   readonly dateSystem: 1900 | 1904;
   /** A fixed "now" for the whole recalculation, so NOW() is consistent. */
