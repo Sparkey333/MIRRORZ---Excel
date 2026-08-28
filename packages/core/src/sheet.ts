@@ -300,13 +300,19 @@ export interface DefinedName {
   hidden?: boolean;
 }
 
+/**
+ * How the workbook recalculates. `autoNoTable` is Excel's third setting:
+ * automatic for everything except data tables, which are the expensive case.
+ */
+export type CalcMode = 'auto' | 'autoNoTable' | 'manual';
+
 export class Workbook {
   readonly sheets: Sheet[] = [];
   readonly styles = new StyleTable();
   definedNames: DefinedName[] = [];
   dateSystem: 1900 | 1904 = 1900;
   /** Calculation mode, mirroring Excel's `calcPr`. */
-  calcMode: 'auto' | 'autoNoTable' | 'manual' = 'auto';
+  calcMode: CalcMode = 'auto';
   fullCalcOnLoad = false;
   /** Raw parts we did not model, preserved verbatim on save. */
   preserved: Record<string, Uint8Array> = {};

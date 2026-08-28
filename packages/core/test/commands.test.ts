@@ -401,3 +401,30 @@ describe('isolation between documents', () => {
     expect(b.canUndo).toBe(true);
   });
 });
+
+describe('calculation mode', () => {
+  it('is logged, so switching to manual can be taken back', () => {
+    const d = doc();
+    expect(d.workbook.calcMode).toBe('auto');
+
+    d.setCalcMode('manual');
+    expect(d.workbook.calcMode).toBe('manual');
+    expect(d.peekUndo()!.label).toBe('Manual calculation');
+
+    // The setting is stored in the file and decides whether the numbers on
+    // screen are current, so leaving it outside the log would be an edit the
+    // user can see and cannot reverse.
+    d.undo();
+    expect(d.workbook.calcMode).toBe('auto');
+    d.redo();
+    expect(d.workbook.calcMode).toBe('manual');
+  });
+
+  it('records nothing when the mode is already what was asked for', () => {
+    const d = doc();
+    d.setCalcMode('manual');
+    const before = d.allEntries().length;
+    d.setCalcMode('manual');
+    expect(d.allEntries().length).toBe(before);
+  });
+});

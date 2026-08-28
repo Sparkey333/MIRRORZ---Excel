@@ -21,6 +21,7 @@ import {
   MAX_ROWS,
   a1,
   parseEntry,
+  type CalcMode,
   type CellData,
   type CellStyle,
   type ChangeOrigin,
@@ -81,7 +82,7 @@ export interface AppSnapshot {
   undoLabel: string | null;
   redoLabel: string | null;
   headId: number | null;
-  calcMode: 'auto' | 'autoNoTable' | 'manual';
+  calcMode: CalcMode;
   lastRecalc: RecalcSummary | null;
   theme: ThemePreference;
   panels: Readonly<Record<PanelName, boolean>>;
@@ -638,10 +639,12 @@ export class AppController {
    * is never saved, and switching to Manual silently reverts the next time the
    * file is opened.
    */
-  setCalcMode(mode: 'auto' | 'autoNoTable' | 'manual'): void {
-    if (this.doc.workbook.calcMode === mode) return;
-    this.doc.workbook.calcMode = mode;
-    this.bump({ dirty: true });
+  setCalcMode(mode: CalcMode): void {
+    // Through the command log, not straight onto the workbook: switching to
+    // manual is stored in the file and changes what every number on screen
+    // means, so it has to be undoable like anything else.
+    this.doc.setCalcMode(mode);
+    this.bump({ dirty: true, calcMode: this.doc.workbook.calcMode });
   }
 
   recalculateAll(): void {

@@ -31,7 +31,7 @@
  * than pretending an inverse exists, which is the honest failure mode.
  */
 
-import type { CellData, ColProps, RowProps, SheetVisibility } from './sheet.js';
+import type { CalcMode, CellData, ColProps, RowProps, SheetVisibility } from './sheet.js';
 import { Sheet, Workbook } from './sheet.js';
 import type { StyleId } from './style.js';
 
@@ -47,7 +47,8 @@ export type Change =
   | { kind: 'sheetColor'; sheet: string; before?: string; after?: string }
   | { kind: 'sheetAdd'; sheet: string; index: number }
   | { kind: 'sheetRemove'; sheet: string; index: number; snapshot: SheetSnapshot }
-  | { kind: 'sheetMove'; sheet: string; from: number; to: number };
+  | { kind: 'sheetMove'; sheet: string; from: number; to: number }
+  | { kind: 'calcMode'; before: CalcMode; after: CalcMode };
 
 /** Everything needed to rebuild a removed sheet, so deleting one is undoable. */
 export interface SheetSnapshot {
@@ -302,6 +303,24 @@ export class Document {
     );
   }
 
+  /**
+   * Switch the workbook between automatic and manual calculation.
+   *
+   * Logged like any other mutation. It is tempting to treat this as a view
+   * preference, but it is stored in the file, it changes what the numbers on
+   * screen mean, and switching to manual on a large workbook and forgetting is
+   * exactly the mistake someone wants to take back.
+   */
+  setCalcMode(mode: CalcMode, options?: CommandOptions): void {
+    const before = this.workbook.calcMode;
+    if (before === mode) return;
+    this.workbook.calcMode = mode;
+    this.record(
+      { kind: 'calcMode', before, after: mode },
+      options ?? { label: mode === 'manual' ? 'Manual calculation' : 'Automatic calculation' },
+    );
+  }
+
   addSheet(name: string, at?: number, options?: CommandOptions): Sheet {
     const sheet = this.workbook.addSheet(name, at);
     this.record(
@@ -486,6 +505,9 @@ export class Document {
         else sheet.tabColor = change.after;
         break;
       }
+      case 'calcMode':
+        this.workbook.calcMode = change.after;
+        break;
       case 'sheetAdd':
         if (!this.workbook.getSheet(change.sheet)) this.workbook.addSheet(change.sheet, change.index);
         break;
@@ -539,6 +561,9 @@ export class Document {
         else sheet.tabColor = change.before;
         break;
       }
+      case 'calcMode':
+        this.workbook.calcMode = change.before;
+        break;
       case 'sheetAdd':
         this.workbook.removeSheet(change.sheet);
         break;
