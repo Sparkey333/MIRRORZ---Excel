@@ -45,7 +45,7 @@ import {
   daysInMonth,
   isError,
   utcMsToSerial,
-} from '../../core/src/index.js';
+} from '@mirrorz/core';
 
 // ---------------------------------------------------------------------------
 // Shared types

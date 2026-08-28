@@ -44,6 +44,7 @@ export type Change =
   | { kind: 'col'; sheet: string; col: number; before?: ColProps; after?: ColProps }
   | { kind: 'sheetName'; sheet: string; before: string; after: string }
   | { kind: 'sheetVisibility'; sheet: string; before: SheetVisibility; after: SheetVisibility }
+  | { kind: 'sheetColor'; sheet: string; before?: string; after?: string }
   | { kind: 'sheetAdd'; sheet: string; index: number }
   | { kind: 'sheetRemove'; sheet: string; index: number; snapshot: SheetSnapshot }
   | { kind: 'sheetMove'; sheet: string; from: number; to: number };
@@ -276,6 +277,31 @@ export class Document {
     });
   }
 
+  /**
+   * Colour a sheet tab.
+   *
+   * A tab colour is a document property like any other, so it belongs in the log
+   * like any other. Without this case the only way for a UI to set one is to
+   * write to the Sheet directly, which leaves an edit the user can see and cannot
+   * undo - and one unlogged writer is enough to make the whole history a lie.
+   */
+  setSheetColor(sheetName: string, color: string | undefined, options?: CommandOptions): void {
+    const sheet = this.requireSheet(sheetName);
+    const before = sheet.tabColor;
+    if (before === color) return;
+    if (color === undefined) delete sheet.tabColor;
+    else sheet.tabColor = color;
+    this.record(
+      {
+        kind: 'sheetColor',
+        sheet: sheetName,
+        ...(before !== undefined ? { before } : {}),
+        ...(color !== undefined ? { after: color } : {}),
+      },
+      options ?? { label: color === undefined ? `Clear colour of ${sheetName}` : `Colour ${sheetName}` },
+    );
+  }
+
   addSheet(name: string, at?: number, options?: CommandOptions): Sheet {
     const sheet = this.workbook.addSheet(name, at);
     this.record(
@@ -453,6 +479,13 @@ export class Document {
         if (sheet) sheet.visibility = change.after;
         break;
       }
+      case 'sheetColor': {
+        const sheet = this.workbook.getSheet(change.sheet);
+        if (!sheet) break;
+        if (change.after === undefined) delete sheet.tabColor;
+        else sheet.tabColor = change.after;
+        break;
+      }
       case 'sheetAdd':
         if (!this.workbook.getSheet(change.sheet)) this.workbook.addSheet(change.sheet, change.index);
         break;
@@ -497,6 +530,13 @@ export class Document {
       case 'sheetVisibility': {
         const sheet = this.workbook.getSheet(change.sheet);
         if (sheet) sheet.visibility = change.before;
+        break;
+      }
+      case 'sheetColor': {
+        const sheet = this.workbook.getSheet(change.sheet);
+        if (!sheet) break;
+        if (change.before === undefined) delete sheet.tabColor;
+        else sheet.tabColor = change.before;
         break;
       }
       case 'sheetAdd':

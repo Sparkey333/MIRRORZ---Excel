@@ -4,11 +4,24 @@
     "outDir": "./dist-types",
     "rootDir": ".",
     "jsx": "react-jsx",
-    "types": ["vite/client"],
+    "types": [
+      "vite/client"
+    ],
     "composite": false,
     "noEmit": true,
     "declaration": false,
     "declarationMap": false
   },
-  "include": ["src/**/*", "test/**/*", "vite.config.ts", "vitest.config.ts"]
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "vite.config.ts",
+    "vitest.config.ts"
+  ],
+  "exclude": [
+    "src/main/**",
+    "src/preload/**",
+    "test/main/**",
+    "dist/**"
+  ]
 }

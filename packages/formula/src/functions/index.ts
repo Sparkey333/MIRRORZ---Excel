@@ -14,6 +14,9 @@
 import { FunctionRegistry, type FunctionSpec } from '../registry.js';
 
 import { DATETIME_FUNCTIONS } from './datetime.js';
+import { DYNAMIC_ARRAY_FUNCTIONS } from './dynamic.js';
+import { ENGINEERING_FUNCTIONS } from './engineering.js';
+import { FINANCIAL_FUNCTIONS } from './financial.js';
 import { LOGICAL_FUNCTIONS } from './logical.js';
 import { LOOKUP_FUNCTIONS } from './lookup.js';
 import { MATH_FUNCTIONS } from './math.js';
@@ -24,6 +27,9 @@ import { TEXT_FUNCTIONS } from './text.js';
 /** Every implemented function, in registration order. */
 export const ALL_FUNCTIONS: readonly FunctionSpec[] = [
   ...DATETIME_FUNCTIONS,
+  ...DYNAMIC_ARRAY_FUNCTIONS,
+  ...ENGINEERING_FUNCTIONS,
+  ...FINANCIAL_FUNCTIONS,
   ...LOGICAL_FUNCTIONS,
   ...LOOKUP_FUNCTIONS,
   ...MATH_FUNCTIONS,

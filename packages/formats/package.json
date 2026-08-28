@@ -7,16 +7,19 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.js"
     },
     "./node": {
-      "types": "./src/zip-node.ts",
-      "default": "./src/zip-node.ts"
+      "types": "./dist/zip-node.d.ts",
+      "development": "./src/zip-node.ts",
+      "default": "./dist/zip-node.js"
     },
     "./numfmt": {
-      "types": "./src/numfmt.ts",
-      "default": "./src/numfmt.ts"
+      "types": "./dist/numfmt.d.ts",
+      "development": "./src/numfmt.ts",
+      "default": "./dist/numfmt.js"
     }
   },
   "dependencies": {

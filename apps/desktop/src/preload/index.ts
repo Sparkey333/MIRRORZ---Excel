@@ -136,25 +136,41 @@ const shell = {
   },
 };
 
-/** The renderer's existing FileHost shape, in terms of the API above. */
+/**
+ * The renderer's existing FileHost shape, in terms of the API above.
+ *
+ * That interface passes a file name where this one passes a path, so the bridge
+ * remembers which path the current document came from - from an open, a save,
+ * or a file the shell pushed in - and uses it for a plain Save. Matching on the
+ * name alone would eventually save into a different directory's file that
+ * happens to share it.
+ */
+let currentPath: string | null = null;
+
+ipcRenderer.on(CHANNEL.openRequest, (_event: IpcRendererEvent, file: OpenedDocument) => {
+  currentPath = file.path;
+});
+
 const legacyHost = {
   async openFile(): Promise<{ name: string; data: Uint8Array } | null> {
     const file = await api.openFile();
-    return file ? { name: file.name, data: file.data } : null;
+    if (!file) return null;
+    currentPath = file.path;
+    return { name: file.name, data: file.data };
   },
   async saveFile(name: string, data: Uint8Array): Promise<boolean> {
-    const recent = await api.recentFiles();
-    const known = recent.find((entry) => entry.name === name);
-    // Without a known path this is a first save, which has to go through the
-    // dialog: silently inventing a location is how files end up in a directory
-    // the user cannot find.
-    const outcome = known
-      ? await api.saveFile(data, known.path)
+    // No known path means this document has never been saved, and a first save
+    // has to go through the dialog: inventing a location is how files end up
+    // somewhere the user cannot find.
+    const outcome = currentPath
+      ? await api.saveFile(data, currentPath)
       : await api.saveFileAs(data, name);
+    if (outcome.ok && outcome.path) currentPath = outcome.path;
     return outcome.ok;
   },
   async saveFileAs(name: string, data: Uint8Array): Promise<string | null> {
     const outcome = await api.saveFileAs(data, name);
+    if (outcome.ok && outcome.path) currentPath = outcome.path;
     return outcome.ok ? (outcome.path ?? null) : null;
   },
 };

@@ -55,6 +55,24 @@ export function contentSecurityPolicy(opts: CspOptions = {}): string {
 export interface NavigationPolicy {
   /** The origin the packaged renderer is served from; `file://` has none. */
   devServer?: string | undefined;
+  /**
+   * Absolute path of the renderer's own `index.html`. Supplied by the window
+   * manager, which is the only place that knows it.
+   *
+   * Without it, `file:` is treated as one origin and ANY local file may be
+   * navigated to - and a local page inherits this window's preload, so a
+   * spreadsheet carrying a link to an HTML file somebody dropped in Downloads
+   * would be a route from a document to our IPC surface. With it, the fence is
+   * the directory the bundle was loaded from and nothing else.
+   */
+  rendererFile?: string | undefined;
+}
+
+/** Directory part of a POSIX-or-Windows path, with separators normalised. */
+function directoryOf(path: string): string {
+  const unified = path.replace(/\\/g, '/');
+  const cut = unified.lastIndexOf('/');
+  return cut <= 0 ? '/' : unified.slice(0, cut);
 }
 
 /**
@@ -68,7 +86,21 @@ export function isAllowedNavigation(target: string, policy: NavigationPolicy = {
   } catch {
     return false;
   }
-  if (url.protocol === 'file:') return true;
+  if (url.protocol === 'file:') {
+    if (policy.rendererFile === undefined) return true;
+    // decodeURIComponent so an escaped separator cannot smuggle a path segment
+    // past the prefix test; a malformed escape is simply not our bundle.
+    let path: string;
+    try {
+      path = decodeURIComponent(url.pathname);
+    } catch {
+      return false;
+    }
+    if (path.includes('\0') || path.includes('..')) return false;
+    const root = `${directoryOf(policy.rendererFile.replace(/\\/g, '/'))}/`;
+    const candidate = path.replace(/\\/g, '/').replace(/^\/([A-Za-z]:)/, '$1');
+    return candidate.startsWith(root.replace(/^\/([A-Za-z]:)/, '$1'));
+  }
   if (policy.devServer) {
     try {
       const dev = new URL(policy.devServer);
@@ -110,9 +142,18 @@ export function decideExternalOpen(target: string): ExternalDecision {
 /**
  * The BrowserWindow webPreferences this application will accept.
  *
- * Exported as data, and asserted in tests, because these four flags are the
- * whole security posture and a future edit that flips one of them should fail a
- * test rather than ship.
+ * Exported as data, and asserted in tests, because these flags are the whole
+ * security posture and a future edit that flips one of them should fail a test
+ * rather than ship.
+ *
+ * `spellcheck: false` is here for a reason that is easy to miss. Chromium's
+ * spellchecker is not local: on Windows and Linux it downloads Hunspell
+ * dictionaries over HTTPS from Google's CDN the first time a spellcheckable
+ * field is focused, and that request is made by the browser process itself, so
+ * no Content-Security-Policy in the renderer can stop it. Leaving the default
+ * on would put a silent outbound connection to a third party inside an
+ * application whose whole promise is that it makes none. The grid is painted on
+ * a canvas and has no spellcheckable field to speak of, so nothing is lost.
  */
 export const SECURE_WEB_PREFERENCES = {
   nodeIntegration: false,
@@ -124,5 +165,5 @@ export const SECURE_WEB_PREFERENCES = {
   allowRunningInsecureContent: false,
   experimentalFeatures: false,
   webviewTag: false,
-  spellcheck: true,
+  spellcheck: false,
 } as const;

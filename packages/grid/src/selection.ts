@@ -66,6 +66,13 @@ export interface SelectionSource {
   isColHidden?(col: number): boolean;
   /** Merged region containing a cell, so the cursor treats one as a unit. */
   mergeAt?(row: number, col: number): GridRange | undefined;
+  /**
+   * Every merge overlapping a rectangle. Optional, but supplying it is what lets
+   * a selection be grown over merges in one pass over the sheet's merge list
+   * instead of a probe per selected cell, which matters the moment somebody
+   * drags a selection over a few hundred rows.
+   */
+  mergesIntersecting?(range: GridRange): Iterable<GridRange>;
 }
 
 /** Adapt a core Sheet. Bounds come from the cached extent, never from a scan. */
@@ -84,6 +91,18 @@ export function sheetSource(sheet: Sheet): SelectionSource {
       const m = sheet.mergeAt(row, col);
       if (!m) return undefined;
       return { top: m.start.row, left: m.start.col, bottom: m.end.row, right: m.end.col };
+    },
+    *mergesIntersecting(range) {
+      for (const m of sheet.merges) {
+        if (m.range.end.row < range.top || m.range.start.row > range.bottom) continue;
+        if (m.range.end.col < range.left || m.range.start.col > range.right) continue;
+        yield {
+          top: m.range.start.row,
+          left: m.range.start.col,
+          bottom: m.range.end.row,
+          right: m.range.end.col,
+        };
+      }
     },
   };
 }
@@ -473,46 +492,54 @@ export class Selection {
    */
   edgeTarget(from: CellPos, direction: Direction): CellPos {
     const { dr, dc } = DELTAS[direction];
-    const limit = this.scanLimit(direction);
-    const distance = dr !== 0 ? Math.abs(limit - from.row) : Math.abs(limit - from.col);
-    if (distance === 0) return from;
-
-    const at = (n: number): CellPos =>
-      dr !== 0 ? { row: from.row + n * dr, col: from.col } : { row: from.row, col: from.col + n * dc };
-
+    const vertical = dr !== 0;
+    const step = vertical ? dr : dc;
     const src = this.source;
-    const currentFilled = !src.isEmpty(from.row, from.col);
-    const nextFilled = !src.isEmpty(at(1).row, at(1).col);
+    const maxIndex = vertical ? MAX_ROWS - 1 : MAX_COLS - 1;
+    const edge = step > 0 ? maxIndex : 0;
+    const start = vertical ? from.row : from.col;
+    if (start === edge) return from;
 
-    if (currentFilled && nextFilled) {
-      let n = 1;
-      while (n < distance && !src.isEmpty(at(n + 1).row, at(n + 1).col)) n++;
-      return at(n);
+    const at = (i: number): CellPos =>
+      vertical ? { row: i, col: from.col } : { row: from.row, col: i };
+    const empty = (i: number): boolean => {
+      const p = at(i);
+      return src.isEmpty(p.row, p.col);
+    };
+
+    // Everything past the used extent is empty by definition, so no scan ever
+    // walks into it. Without this a Ctrl+Down from row 900,000 of an otherwise
+    // empty sheet probes 900,000 cells on one keystroke.
+    const extent = vertical ? src.lastRow : src.lastCol;
+
+    // Case 1: standing in a block whose next cell is also filled - run to the
+    // last cell of the run. A filled cell cannot exist past the used extent, so
+    // the walk stops there rather than trusting isEmpty to terminate it.
+    if (!empty(start) && !empty(start + step)) {
+      let i = start + step;
+      if (step > 0) {
+        const runLimit = Math.min(edge, Math.max(extent, start + 1));
+        while (i < runLimit && !empty(i + 1)) i++;
+      } else {
+        while (i > 0 && !empty(i - 1)) i--;
+      }
+      return at(i);
     }
 
-    for (let n = 1; n <= distance; n++) {
-      const p = at(n);
-      if (!src.isEmpty(p.row, p.col)) return p;
+    // Case 2: find the first filled cell in this direction. Skipping straight to
+    // the extent is what keeps the scan off the empty three quarters of a sheet.
+    if (extent >= 0) {
+      if (step > 0) {
+        const last = Math.min(edge, extent);
+        for (let i = start + 1; i <= last; i++) if (!empty(i)) return at(i);
+      } else {
+        const first = Math.min(start - 1, extent);
+        for (let i = first; i >= 0; i--) if (!empty(i)) return at(i);
+      }
     }
-    return dr !== 0 ? { row: edgeIndex(direction), col: from.col } : { row: from.row, col: edgeIndex(direction) };
-  }
 
-  /**
-   * How far a scan may usefully go: one step past the used extent, because
-   * everything beyond it is empty by definition.
-   */
-  private scanLimit(direction: Direction): number {
-    const src = this.source;
-    switch (direction) {
-      case 'up':
-        return 0;
-      case 'left':
-        return 0;
-      case 'down':
-        return Math.min(MAX_ROWS - 1, Math.max(0, src.lastRow + 1));
-      case 'right':
-        return Math.min(MAX_COLS - 1, Math.max(0, src.lastCol + 1));
-    }
+    // Case 3: nothing left in that direction, so the sheet edge.
+    return at(edge);
   }
 
   /** Ctrl+End: the bottom-right of the used range, or A1 for an empty sheet. */
@@ -739,42 +766,75 @@ export class Selection {
    * does the moment a selection touches one.
    */
   private expandOverMerges(range: GridRange): GridRange {
+    const src = this.source;
+    let box = range;
+    // Each pass can only grow the rectangle, so a handful of passes reaches the
+    // fixpoint for any sane layout and a pathological one cannot spin.
+    for (let pass = 0; pass < 4; pass++) {
+      const next = src.mergesIntersecting
+        ? growOverMergeList(box, src.mergesIntersecting(box))
+        : this.growOverMergePerimeter(box);
+      if (sameRange(next, box)) return box;
+      box = next;
+    }
+    return box;
+  }
+
+  /**
+   * Fallback for a source that can only answer "what merge is at this cell".
+   *
+   * Only the PERIMETER is probed, and that is not an approximation: a merge that
+   * escapes the rectangle also overlaps it, and the overlap is itself a rectangle
+   * touching the side it escapes through, so it always has a cell on the
+   * perimeter. Probing the interior as well would cost the area of the selection
+   * - forty thousand lookups for a two-hundred-row drag, on every pointer move -
+   * and could not find anything the perimeter misses.
+   */
+  private growOverMergePerimeter(range: GridRange): GridRange {
     const mergeAt = this.source.mergeAt;
     if (!mergeAt) return range;
-    let { top, left, bottom, right } = range;
-    // Two passes is enough in practice; each pass can only grow the rectangle,
-    // and a fixpoint loop over a pathological merge layout is not worth the risk
-    // of spinning inside a paint.
-    for (let pass = 0; pass < 2; pass++) {
-      let changed = false;
-      const area = (bottom - top + 1) * (right - left + 1);
-      if (area > 65_536) break;
-      for (let r = top; r <= bottom; r++) {
-        for (let c = left; c <= right; c++) {
-          const m = mergeAt(r, c);
-          if (!m) continue;
-          if (m.top < top) (top = m.top), (changed = true);
-          if (m.left < left) (left = m.left), (changed = true);
-          if (m.bottom > bottom) (bottom = m.bottom), (changed = true);
-          if (m.right > right) (right = m.right), (changed = true);
-        }
-      }
-      if (!changed) break;
+    const { top, left, bottom, right } = range;
+    const height = bottom - top + 1;
+    const width = right - left + 1;
+    // A whole-row or whole-column selection has a perimeter the length of the
+    // sheet; nothing is gained by walking it, so leave such a range alone.
+    if (height + width > 8192) return range;
+
+    let box = range;
+    const consider = (r: number, c: number): void => {
+      const m = mergeAt(r, c);
+      if (m) box = unionRange(box, m);
+    };
+    for (let c = left; c <= right; c++) {
+      consider(top, c);
+      if (bottom !== top) consider(bottom, c);
     }
-    return { top, left, bottom, right };
+    for (let r = top + 1; r < bottom; r++) {
+      consider(r, left);
+      if (right !== left) consider(r, right);
+    }
+    return box;
   }
 }
 
-function edgeIndex(direction: Direction): number {
-  switch (direction) {
-    case 'up':
-    case 'left':
-      return 0;
-    case 'down':
-      return MAX_ROWS - 1;
-    case 'right':
-      return MAX_COLS - 1;
-  }
+function sameRange(a: GridRange, b: GridRange): boolean {
+  return a.top === b.top && a.left === b.left && a.bottom === b.bottom && a.right === b.right;
+}
+
+function unionRange(a: GridRange, b: GridRange): GridRange {
+  return {
+    top: Math.min(a.top, b.top),
+    left: Math.min(a.left, b.left),
+    bottom: Math.max(a.bottom, b.bottom),
+    right: Math.max(a.right, b.right),
+  };
+}
+
+/** Grow a rectangle over an exact list of overlapping merges. */
+function growOverMergeList(range: GridRange, merges: Iterable<GridRange>): GridRange {
+  let box = range;
+  for (const m of merges) box = unionRange(box, m);
+  return box;
 }
 
 function clampRow(row: number): number {

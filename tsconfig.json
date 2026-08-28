@@ -1,0 +1,20 @@
+{
+  // A solution file: it compiles nothing itself and exists so that
+  // `tsc --build` at the root has a graph to walk. The order here does not
+  // matter - each project declares its own references and TypeScript topologically
+  // sorts them.
+  //
+  // apps/desktop is deliberately absent. It is not a composite project: Vite
+  // builds it and TypeScript only ever checks it, so it cannot be a build
+  // reference. The root `typecheck` script runs its two configs separately.
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/formats" },
+    { "path": "packages/formula" },
+    { "path": "packages/grid" },
+    { "path": "packages/licensing" },
+    { "path": "packages/vba" },
+    { "path": "apps/cli" }
+  ]
+}

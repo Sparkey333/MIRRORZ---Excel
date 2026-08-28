@@ -17,6 +17,8 @@
 
 import {
   DEFAULT_STYLE_ID,
+  MAX_COLS,
+  MAX_ROWS,
   a1,
   parseEntry,
   type CellData,
@@ -85,6 +87,13 @@ export interface AppSnapshot {
   panels: Readonly<Record<PanelName, boolean>>;
   paletteOpen: boolean;
   paletteMode: 'all' | 'command';
+  /**
+   * Find and replace is open. This lives here rather than in the toolbar that
+   * draws it because the native menu and the keyboard both have to be able to
+   * open it, and a useState inside one component is reachable only by that
+   * component's own button.
+   */
+  findOpen: boolean;
   pendingImport: PendingImport | null;
   fileName: string;
   dirty: boolean;
@@ -145,6 +154,7 @@ export class AppController {
       panels: { explorer: true, history: false, inspector: false },
       paletteOpen: false,
       paletteMode: 'all',
+      findOpen: false,
       pendingImport: null,
       fileName: 'Untitled',
       dirty: false,
@@ -268,6 +278,22 @@ export class AppController {
 
   explain(addr: CellAddr): CellExplanation {
     return this.engine.explain(addr);
+  }
+
+  /**
+   * One-line descriptions for the completion list, straight from the registry.
+   *
+   * Drawn from the registry rather than a table in the UI so the editor cannot
+   * describe a function the engine does not have, or describe one it has
+   * differently from the way it behaves.
+   */
+  functionSummaries(): Record<string, string> {
+    const summaries: Record<string, string> = {};
+    for (const name of this.registry.names()) {
+      const summary = this.registry.get(name)?.summary;
+      if (summary !== undefined) summaries[name] = summary;
+    }
+    return summaries;
   }
 
   // --- selection and navigation ------------------------------------------
@@ -422,6 +448,15 @@ export class AppController {
   private shiftRows(sheet: Sheet, at: number, delta: number, label: string): void {
     const bounds = sheet.bounds();
     if (!bounds) return;
+    // Excel refuses an insert that would push a used cell off the bottom rather
+    // than dropping it, and so do we. This is not hypothetical: selecting a
+    // column header selects 1,048,576 rows, and "insert rows" over that
+    // selection asks to shift every cell a million rows down - past the end of
+    // the sheet, where the addresses are not addresses any more.
+    if (delta > 0 && bounds.maxRow + delta >= MAX_ROWS) {
+      this.bump({ message: 'That would push data off the bottom of the sheet' });
+      return;
+    }
     const moved: { row: number; col: number; cell: CellData }[] = [];
     let formulas = 0;
     for (const entry of sheet.entries()) {
@@ -449,6 +484,10 @@ export class AppController {
   private shiftCols(sheet: Sheet, at: number, delta: number, label: string): void {
     const bounds = sheet.bounds();
     if (!bounds) return;
+    if (delta > 0 && bounds.maxCol + delta >= MAX_COLS) {
+      this.bump({ message: 'That would push data off the right of the sheet' });
+      return;
+    }
     const moved: { row: number; col: number; cell: CellData }[] = [];
     let formulas = 0;
     for (const entry of sheet.entries()) {
@@ -543,16 +582,19 @@ export class AppController {
   /**
    * Colour a sheet tab.
    *
-   * This is the one edit in the application that does not go through the command
-   * log, because `Change` in core has no case for a tab colour. It is therefore
-   * not undoable; core needs a `sheetColor` change kind before it can be.
+   * Goes through the command log like every other edit. It used to be written
+   * straight onto the Sheet, because core had no `sheetColor` change kind; that
+   * made it the one visible edit in the application that undo silently ignored,
+   * which is worse than it sounds - an undo that skips an edit does not just fail
+   * to reverse it, it leaves the user's mental model of the history wrong.
    */
   setSheetColor(name: string, color: string | undefined): void {
-    const sheet = this.doc.workbook.getSheet(name);
-    if (!sheet) return;
-    if (color === undefined) delete sheet.tabColor;
-    else sheet.tabColor = color;
-    this.bump({ dirty: true });
+    if (!this.doc.workbook.getSheet(name)) return;
+    this.doc.setSheetColor(name, color, {
+      label: color === undefined ? `Clear colour of ${name}` : `Colour ${name}`,
+      origin: 'user',
+      timestamp: this.now(),
+    });
   }
 
   // --- history ------------------------------------------------------------
@@ -585,9 +627,21 @@ export class AppController {
 
   // --- calculation --------------------------------------------------------
 
+  /**
+   * The one workbook property the UI writes without going through a command,
+   * because there is no command for it: calculation mode is a setting on the
+   * workbook rather than an edit to its contents, and it has no inverse worth
+   * putting on the undo stack.
+   *
+   * It is still a change that gets written into the saved file, so it must mark
+   * the document dirty. Without that the close prompt never appears, the change
+   * is never saved, and switching to Manual silently reverts the next time the
+   * file is opened.
+   */
   setCalcMode(mode: 'auto' | 'autoNoTable' | 'manual'): void {
+    if (this.doc.workbook.calcMode === mode) return;
     this.doc.workbook.calcMode = mode;
-    this.bump();
+    this.bump({ dirty: true });
   }
 
   recalculateAll(): void {
@@ -668,7 +722,21 @@ export class AppController {
   sortSelection(byColumn: number, direction: 'asc' | 'desc' = 'asc', hasHeader = false): void {
     const sheet = this.sheet();
     if (!sheet) return;
-    const range = normaliseRange(this.snapshot.selection.ranges[0]!);
+    const raw = normaliseRange(this.snapshot.selection.ranges[0]!);
+    // Clamped to the used range, exactly as `selectedAddresses` is. Selecting a
+    // whole column selects 1,048,576 addresses; sorting the empty million below
+    // the data would build a million row records, write a million empty cells
+    // into one transaction, and hang the window for minutes. The user meant the
+    // rows with data in them.
+    const bounds = sheet.bounds();
+    if (!bounds) return;
+    const range = {
+      start: raw.start,
+      end: {
+        row: Math.min(raw.end.row, Math.max(bounds.maxRow, raw.start.row)),
+        col: Math.min(raw.end.col, Math.max(bounds.maxCol, raw.start.col)),
+      },
+    };
     const firstRow = range.start.row + (hasHeader ? 1 : 0);
     if (firstRow > range.end.row) return;
 
@@ -791,6 +859,35 @@ export class AppController {
 
   setPalette(open: boolean, mode: 'all' | 'command' = 'all'): void {
     this.bump({ paletteOpen: open, paletteMode: mode });
+  }
+
+  /**
+   * Select the whole used extent of the active sheet.
+   *
+   * The used extent rather than all 17 billion addresses: selecting the entire
+   * grid would make every selection-wide operation - a format, a sort, the
+   * status-bar aggregate - walk a range that is almost entirely empty. An empty
+   * sheet has no extent, so the selection stays where it is.
+   */
+  selectAll(): void {
+    const sheet = this.sheet();
+    const bounds = sheet?.bounds();
+    if (!sheet || !bounds) return;
+    this.setSelection({
+      sheet: sheet.name,
+      active: { row: bounds.minRow, col: bounds.minCol },
+      ranges: [
+        {
+          start: { row: bounds.minRow, col: bounds.minCol },
+          end: { row: bounds.maxRow, col: bounds.maxCol },
+        },
+      ],
+    });
+  }
+
+  /** Open or close find and replace; no argument toggles it. */
+  setFind(open?: boolean): void {
+    this.bump({ findOpen: open ?? !this.snapshot.findOpen });
   }
 
   setMessage(message: string | null): void {

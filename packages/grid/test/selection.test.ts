@@ -629,3 +629,131 @@ describe('Selection - merged cells', () => {
     expect(s.ranges[0]).toEqual({ top: 0, left: 0, bottom: 2, right: 3 });
   });
 });
+
+/**
+ * The cursor may sit anywhere in a 1,048,576-row sheet, and every one of these
+ * moves is a single keystroke. A scan that starts from where the cursor happens
+ * to be, rather than from where the data is, freezes the app for a keypress.
+ */
+describe('Selection - navigation never walks the whole grid', () => {
+  function countingSource(lastRow: number, lastCol: number) {
+    const probes = { n: 0 };
+    const source = {
+      isEmpty: () => {
+        probes.n++;
+        return true;
+      },
+      lastRow,
+      lastCol,
+    };
+    return { probes, source };
+  }
+
+  it('does not probe the empty rows below the data on Ctrl+Down', () => {
+    const { probes, source } = countingSource(20, 20);
+    const s = new Selection({ source });
+    s.selectCell(900_000, 0);
+    probes.n = 0;
+    s.keyDown({ key: 'ArrowDown', ctrl: true });
+    expect(probes.n).toBeLessThan(64);
+    // Excel runs to the bottom of the sheet from below the data.
+    expect(pos(s)).toEqual([MAX_ROWS - 1, 0]);
+  });
+
+  it('does not probe the empty rows below the data on Ctrl+Up', () => {
+    const { probes, source } = countingSource(20, 20);
+    const s = new Selection({ source });
+    s.selectCell(900_000, 0);
+    probes.n = 0;
+    s.keyDown({ key: 'ArrowUp', ctrl: true });
+    expect(probes.n).toBeLessThan(64);
+    expect(pos(s)).toEqual([0, 0]);
+  });
+
+  it('does not probe the empty columns right of the data on Ctrl+Right', () => {
+    const { probes, source } = countingSource(20, 20);
+    const s = new Selection({ source });
+    s.selectCell(0, 10_000);
+    probes.n = 0;
+    s.keyDown({ key: 'ArrowRight', ctrl: true });
+    expect(probes.n).toBeLessThan(64);
+    expect(pos(s)).toEqual([0, MAX_COLS - 1]);
+  });
+
+  it('still stops on the first filled cell above a far-off cursor', () => {
+    const wb = new Workbook();
+    const sh = wb.addSheet('S');
+    sh.setValue(5, 0, 1);
+    const s = new Selection({ source: sheetSource(sh) });
+    s.selectCell(500_000, 0);
+    s.keyDown({ key: 'ArrowUp', ctrl: true });
+    expect(pos(s)).toEqual([5, 0]);
+  });
+});
+
+describe('Selection - merge expansion cost', () => {
+  it('does not probe every selected cell when growing over merges', () => {
+    const mergeAt = vi.fn(() => undefined);
+    const s = new Selection({
+      source: { isEmpty: () => true, lastRow: 500, lastCol: 500, mergeAt },
+    });
+    s.selectCell(0, 0);
+    mergeAt.mockClear();
+    s.extendTo(199, 199);
+    // The perimeter of a 200x200 rectangle, not its area.
+    expect(mergeAt.mock.calls.length).toBeLessThan(1000);
+  });
+
+  it('still grows over a merge that only the interior of the drag touches', () => {
+    const merge = { top: 100, left: 100, bottom: 100, right: 400 };
+    const s = new Selection({
+      source: {
+        isEmpty: () => true,
+        lastRow: 500,
+        lastCol: 500,
+        mergeAt: (row: number, col: number) =>
+          row === merge.top && col >= merge.left && col <= merge.right ? merge : undefined,
+      },
+    });
+    s.selectCell(0, 0);
+    s.extendTo(199, 199);
+    expect(s.ranges[0]).toEqual({ top: 0, left: 0, bottom: 199, right: 400 });
+  });
+
+  it('uses the sheet merge list when one is offered, with no per-cell probing', () => {
+    const wb = new Workbook();
+    const sh = wb.addSheet('S');
+    sh.merges = [{ range: parseRangeRef('C150:H250')! }];
+    const source = sheetSource(sh);
+    const probe = vi.fn(source.mergeAt!);
+    const s = new Selection({ source: { ...source, mergeAt: probe } });
+    s.selectCell(0, 0);
+    probe.mockClear();
+    s.extendTo(199, 199);
+    expect(s.ranges[0]).toEqual({ top: 0, left: 0, bottom: 249, right: 199 });
+    expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe('Selection - a block run stops at the used extent', () => {
+  it('does not walk the sheet when the source claims every cell is filled', () => {
+    // A source whose extent and contents disagree - a stale bounds cache, or a
+    // test double - must still not cost a million probes.
+    const probes = { n: 0 };
+    const s = new Selection({
+      source: {
+        isEmpty: () => {
+          probes.n++;
+          return false;
+        },
+        lastRow: 30,
+        lastCol: 30,
+      },
+    });
+    s.selectCell(0, 0);
+    probes.n = 0;
+    s.keyDown({ key: 'ArrowDown', ctrl: true });
+    expect(probes.n).toBeLessThan(64);
+    expect(pos(s)).toEqual([30, 0]);
+  });
+});

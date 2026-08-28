@@ -1,6 +1,16 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  /**
+   * Resolve workspace packages to their TypeScript sources.
+   *
+   * Each package exports `development` -> src and `default` -> dist. Node picks
+   * `default`, which is what makes the published CLI runnable without a
+   * TypeScript loader; asking for `development` here keeps every test and the
+   * dev server compiling straight from source, so there is no build step
+   * between editing a file and running its tests.
+   */
+  resolve: { conditions: ['development'] },
   test: {
     include: [
       'packages/*/test/**/*.test.ts',

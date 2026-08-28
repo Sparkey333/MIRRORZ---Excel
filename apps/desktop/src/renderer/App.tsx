@@ -12,7 +12,13 @@ import { useCallback, useState } from 'react';
 import { useApp, useController } from './state/context.js';
 import { useTheme } from './state/useTheme.js';
 import { useKeyboard } from './state/useKeyboard.js';
-import { isDelimitedName, readDelimited, resolveHost, serializeWorkbook } from './state/host.js';
+import { useDocumentState, useShell } from './state/useShell.js';
+import {
+  isDelimitedName,
+  readDelimited,
+  resolveHost,
+  serializeWorkbook,
+} from './state/host.js';
 import { Toolbar } from './components/Toolbar.js';
 import { FormulaBar } from './components/FormulaBar.js';
 import { GridHost } from './components/GridHost.js';
@@ -36,26 +42,39 @@ export function App({ onOpenWorkbook }: AppProps = {}) {
   useKeyboard(controller);
   const [host] = useState(() => resolveHost());
 
+  /**
+   * Take in a file, whichever way it arrived.
+   *
+   * The Open button and the operating system reach exactly the same code: a
+   * double-clicked spreadsheet has to behave identically to one picked from the
+   * dialog, and the only way to guarantee that is for there to be one path.
+   */
+  const acceptFile = useCallback(
+    (file: { name: string; data: Uint8Array }) => {
+      // A delimited file is data going into the current workbook and goes
+      // through the import review; a workbook file replaces the document.
+      if (isDelimitedName(file.name)) {
+        const { rows } = readDelimited(file);
+        const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+        controller.proposeImport({
+          anchor: controller.activeAddr(),
+          rows,
+          overrides: Array.from({ length: width }, () => 'auto' as const),
+          headerRow: true,
+          source: 'csv',
+          fileName: file.name,
+        });
+        return;
+      }
+      onOpenWorkbook?.(file);
+    },
+    [controller, onOpenWorkbook],
+  );
+
   const openFile = useCallback(async () => {
     const file = await host.openFile();
-    if (!file) return;
-    // A delimited file is data going into the current workbook and goes through
-    // the import review; a workbook file replaces the document outright.
-    if (isDelimitedName(file.name)) {
-      const { rows } = readDelimited(file);
-      const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
-      controller.proposeImport({
-        anchor: controller.activeAddr(),
-        rows,
-        overrides: Array.from({ length: width }, () => 'auto' as const),
-        headerRow: true,
-        source: 'csv',
-        fileName: file.name,
-      });
-      return;
-    }
-    onOpenWorkbook?.(file);
-  }, [controller, host, onOpenWorkbook]);
+    if (file) acceptFile(file);
+  }, [acceptFile, host]);
 
   const save = useCallback(
     async (as: boolean) => {
@@ -69,6 +88,20 @@ export function App({ onOpenWorkbook }: AppProps = {}) {
     },
     [controller, host, snapshot.fileName],
   );
+
+  // The native menu, files the operating system pushes at us, and the autosave
+  // clock. Main has been sending all three since it was written; this is the
+  // end that receives them.
+  useShell(controller, {
+    openFile: () => void openFile(),
+    save: (as) => void save(as),
+    acceptFile,
+    serialize: () => serializeWorkbook(controller.workbook),
+  });
+
+  // Main gates the unsaved-changes prompt and the autosave ticker on this, so a
+  // window whose renderer never reports it closes on unsaved work in silence.
+  useDocumentState(snapshot.dirty, snapshot.fileName);
 
   return (
     <div className="mz-app" data-theme={snapshot.theme}>

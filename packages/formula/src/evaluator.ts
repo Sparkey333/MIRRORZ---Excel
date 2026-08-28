@@ -633,8 +633,12 @@ export function applyBinaryScalar(op: string, a: Scalar, b: Scalar): Scalar {
         case '/':
           return y === 0 ? CellError.DIV0 : finite(x / y);
         default: {
-          // 0^0 is 1 in Excel; a negative base with a fractional exponent is
-          // #NUM! rather than NaN.
+          // Excel documents `^` as another spelling of POWER, so the two must
+          // agree on the awkward bases: 0^0 is #NUM!, 0 to a negative power is
+          // #DIV/0!, and a negative base with a fractional exponent is #NUM!
+          // rather than NaN.
+          if (x === 0 && y === 0) return CellError.NUM;
+          if (x === 0 && y < 0) return CellError.DIV0;
           const r = x ** y;
           return Number.isNaN(r) ? CellError.NUM : finite(r);
         }

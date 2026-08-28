@@ -348,6 +348,43 @@ describe('import staging', () => {
   });
 });
 
+describe('every visible edit is undoable', () => {
+  it('undoes a tab colour', () => {
+    const controller = createController(undefined, { now: () => 1 });
+    controller.addSheet('Data');
+    controller.setSheetColor('Data', '#e03131');
+    expect(controller.workbook.getSheet('Data')!.tabColor).toBe('#e03131');
+
+    // A tab colour used to be written straight onto the Sheet, which left one
+    // edit the user could see and undo silently skipped.
+    expect(controller.getSnapshot().canUndo).toBe(true);
+    controller.undo();
+    expect(controller.workbook.getSheet('Data')!.tabColor).toBeUndefined();
+  });
+
+  it('sorts only the used rows of a whole-column selection', () => {
+    const controller = createController(undefined, { now: () => 1 });
+    controller.commitEntry('2', { sheet: 'Sheet1', row: 0, col: 0 });
+    controller.commitEntry('1', { sheet: 'Sheet1', row: 1, col: 0 });
+
+    // A whole-column selection covers 1,048,576 addresses. Sorting the empty
+    // million below the data would build a million row records and write a
+    // million blanks into one transaction.
+    controller.setSelection({
+      sheet: 'Sheet1',
+      active: { row: 0, col: 0 },
+      ranges: [{ start: { row: 0, col: 0 }, end: { row: 1_048_575, col: 0 } }],
+    });
+    const started = Date.now();
+    controller.sortSelection(0, 'asc');
+    expect(Date.now() - started).toBeLessThan(2000);
+
+    expect(controller.cellAt({ sheet: 'Sheet1', row: 0, col: 0 })?.value).toBe(1);
+    expect(controller.cellAt({ sheet: 'Sheet1', row: 1, col: 0 })?.value).toBe(2);
+    expect(controller.sheet()!.bounds()).toEqual({ minRow: 0, minCol: 0, maxRow: 1, maxCol: 0 });
+  });
+});
+
 describe('compareScalars', () => {
   it('orders numbers before text', () => {
     expect(compareScalars(1, 'a')).toBeLessThan(0);

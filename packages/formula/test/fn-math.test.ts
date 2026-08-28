@@ -80,7 +80,7 @@ const FORMULA_CASES = [
   'INT', 'TRUNC', 'ABS', 'SIGN', 'MOD', 'QUOTIENT', 'POWER', 'SQRT',
   'EXP', 'LN', 'LOG10', 'LOG', 'PI', 'SIN', 'COS', 'TAN', 'ATAN2',
   'DEGREES', 'RADIANS', 'GCD', 'LCM', 'FACT', 'COMBIN',
-  'ARRAY_SUM', 'RANGE_OP', 'UNION_OP',
+  'ARRAY_SUM', 'RANGE_OP', 'UNION_OP', 'ERR_REF',
 ];
 
 const PRECEDENCE_CASES = [
@@ -177,6 +177,12 @@ data.setValue(3, 4, 8);
 // A far-away cell, so a whole-column reference has a large but sparse extent.
 data.setValue(9999, 0, 100);
 
+// A column holding more values than a function call can take as arguments, so
+// that MAX and MIN are exercised past the point where spreading them into
+// Math.max would overflow the call stack.
+const wide = book.addSheet('Wide');
+for (let r = 0; r < 200_000; r++) wide.setValue(r, 0, (r * 7919) % 100_003);
+
 const ev = evaluatorFor(book);
 
 /** Evaluate at Calc!A1, keeping arrays and references intact. */
@@ -248,6 +254,12 @@ describe('SUM', () => {
 
   it('adds through excelAdd, so cancellation snaps as Excel does', () => {
     expect(calc('SUM(0.1,0.2)-0.3')).toBe(0);
+  });
+
+  it('reports an overflow as #NUM! rather than handing back an Infinity', () => {
+    expect(code('SUM(1E308,1E308)')).toBe('#NUM!');
+    expect(code('SUMIF({1,2},">0",{1E308,1E308})')).toBe('#NUM!');
+    expect(code('SUMIFS({1E308,1E308},{1,2},">0")')).toBe('#NUM!');
   });
 
   it('walks only materialised cells of a whole-column reference', () => {
@@ -384,6 +396,23 @@ describe('SUBTOTAL and AGGREGATE', () => {
 
   it('propagates errors, having no option to ignore them', () => {
     expect(code('SUBTOTAL(9,S!C1:C3)')).toBe('#DIV/0!');
+  });
+
+  it('never reports an error from COUNT or COUNTA, which do not propagate one', () => {
+    // COUNT ignores error values in a reference; COUNTA counts them as values.
+    // Neither has any way to return one, whatever the range holds.
+    expect(calc('SUBTOTAL(2,S!C1:C3)')).toBe(2);
+    expect(calc('SUBTOTAL(3,S!C1:C3)')).toBe(3);
+    expect(calc('SUBTOTAL(102,S!C1:C3)')).toBe(2);
+    expect(calc('AGGREGATE(2,0,S!C1:C3)')).toBe(2);
+    expect(calc('AGGREGATE(3,0,S!C1:C3)')).toBe(3);
+    // Ignoring error values drops them from COUNTA's tally as well.
+    expect(calc('AGGREGATE(3,6,S!C1:C3)')).toBe(2);
+  });
+
+  it('takes MAX and MIN over more values than a call can hold as arguments', () => {
+    expect(calc('SUBTOTAL(4,Wide!A1:A200000)')).toBe(100002);
+    expect(calc('AGGREGATE(5,0,Wide!A1:A200000)')).toBe(0);
   });
 
   it('ignores error values only for the options that say so', () => {
@@ -609,6 +638,21 @@ describe('modular and power arithmetic', () => {
     expect(code('POWER(10,400)')).toBe('#NUM!');
   });
 
+  it('agrees with the ^ operator on every awkward base', () => {
+    // Excel documents ^ as another spelling of POWER, so the two cannot differ.
+    for (const [fn, op] of [
+      ['POWER(0,0)', '0^0'],
+      ['POWER(0,-1)', '0^-1'],
+      ['POWER(-8,0.5)', '(-8)^0.5'],
+      ['POWER(2,10)', '2^10'],
+      ['POWER(0,2)', '0^2'],
+    ] as const) {
+      expect(calc(op), op).toEqual(calc(fn));
+    }
+    expect(code('0^0')).toBe('#NUM!');
+    expect(code('0^-1')).toBe('#DIV/0!');
+  });
+
   it('SQRT and SQRTPI reject negatives', () => {
     expect(calc('SQRT(144)')).toBe(12);
     expect(calc('SQRT(0)')).toBe(0);
@@ -677,6 +721,13 @@ describe('trigonometry', () => {
     expect(code('COTH(0)')).toBe('#DIV/0!');
   });
 
+  it('COTH saturates at plus and minus one instead of overflowing', () => {
+    // cosh(1000)/sinh(1000) is Infinity/Infinity; the answer is 1.
+    expect(num('COTH(1000)')).toBe(1);
+    expect(num('COTH(-1000)')).toBe(-1);
+    expect(num('COTH(20)')).toBe(1);
+  });
+
   it('ACOT returns the principal value between 0 and pi', () => {
     expect(num('ACOT(0)')).toBe(toExcelPrecision(Math.PI / 2));
     expect(num('ACOT(1)')).toBe(toExcelPrecision(Math.PI / 4));
@@ -707,6 +758,9 @@ describe('integer and combinatorial functions', () => {
     expect(calc('GCD(24.9,36.9)')).toBe(12);
     expect(code('GCD(-4,2)')).toBe('#NUM!');
     expect(code('LCM(-4,2)')).toBe('#NUM!');
+    // -0.5 is below zero even though Math.trunc would make it -0.
+    expect(code('GCD(-0.5,4)')).toBe('#NUM!');
+    expect(code('LCM(-0.5,4)')).toBe('#NUM!');
   });
 
   it('FACT and FACTDOUBLE', () => {
@@ -719,6 +773,15 @@ describe('integer and combinatorial functions', () => {
     expect(calc('FACTDOUBLE(6)')).toBe(48);
     expect(calc('FACTDOUBLE(0)')).toBe(1);
     expect(code('FACTDOUBLE(-1)')).toBe('#NUM!');
+  });
+
+  it('answers #NUM! for a huge argument instead of counting up to it', () => {
+    // Each of these overflows a double long before its loop would end, so the
+    // answer has to arrive without running the loop to completion.
+    expect(code('FACT(1E15)')).toBe('#NUM!');
+    expect(code('FACTDOUBLE(1E15)')).toBe('#NUM!');
+    expect(code('COMBIN(1E15,5E14)')).toBe('#NUM!');
+    expect(code('PERMUT(1E15,1E15)')).toBe('#NUM!');
   });
 
   it('COMBIN and COMBINA', () => {
@@ -737,6 +800,10 @@ describe('integer and combinatorial functions', () => {
     expect(calc('PERMUT(5,2)')).toBe(20);
     expect(calc('PERMUT(3,3)')).toBe(6);
     expect(code('PERMUT(2,5)')).toBe('#NUM!');
+    // Microsoft documents #NUM! when number is less than *or equal to* zero,
+    // which is where PERMUT parts company with COMBIN(0,0).
+    expect(code('PERMUT(0,0)')).toBe('#NUM!');
+    expect(code('PERMUT(-1,0)')).toBe('#NUM!');
     expect(calc('PERMUTATIONA(3,2)')).toBe(9);
     expect(calc('PERMUTATIONA(0,0)')).toBe(1);
     expect(code('PERMUTATIONA(-1,2)')).toBe('#NUM!');

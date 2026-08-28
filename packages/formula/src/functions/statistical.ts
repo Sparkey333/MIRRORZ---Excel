@@ -2656,30 +2656,10 @@ const SPECIAL: FunctionSpec[] = [
       return isError(y) ? y : Math.tanh(y);
     },
   },
-  {
-    name: 'ERF',
-    params: [p.scalar('lower_limit'), p.scalar('upper_limit', true)],
-    broadcast: true,
-    summary: 'Returns the error function.',
-    impl: (args) => {
-      const lower = numArg(args[0]);
-      if (isError(lower)) return lower;
-      if (args[1] === undefined) return erf(lower);
-      const upper = numArg(args[1]);
-      if (isError(upper)) return upper;
-      return excelSub(erf(upper), erf(lower));
-    },
-  },
-  {
-    name: 'ERFC',
-    params: [p.scalar('x')],
-    broadcast: true,
-    summary: 'Returns the complementary error function.',
-    impl: (args) => {
-      const x = numArg(args[0]);
-      return isError(x) ? x : erfc(x);
-    },
-  },
+  // ERF, ERFC and their .PRECISE spellings are engineering functions in Excel,
+  // not statistical ones, and live in engineering.ts. The `erf` and `erfc`
+  // helpers stay here because the normal, chi-square and t distributions are
+  // all defined in terms of them; what moved is only the worksheet name.
 ];
 
 const HYPOTHESIS_TESTS: FunctionSpec[] = [
@@ -2827,6 +2807,140 @@ const HYPOTHESIS_TESTS: FunctionSpec[] = [
   },
 ];
 
+/**
+ * The pre-2010 spellings, implemented rather than aliased.
+ *
+ * Most old names are exact aliases and live in FUNCTION_ALIASES. These six are
+ * not: each differs from its modern replacement in its argument list or in what
+ * it returns, so aliasing them would give a wrong answer to a file written
+ * before 2010 - which is most files.
+ */
+const COMPATIBILITY: FunctionSpec[] = [
+  {
+    name: 'NORMSDIST',
+    params: [p.scalar('z')],
+    broadcast: true,
+    deprecatedAliasOf: 'NORM.S.DIST',
+    summary: 'Returns the standard normal cumulative distribution.',
+    impl: (args) => {
+      const z = numArg(args[0]);
+      return isError(z) ? z : normCdf(z);
+    },
+  },
+  {
+    name: 'LOGNORMDIST',
+    params: [p.scalar('x'), p.scalar('mean'), p.scalar('standard_dev')],
+    broadcast: true,
+    deprecatedAliasOf: 'LOGNORM.DIST',
+    summary: 'Returns the cumulative lognormal distribution.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const mean = numArg(args[1]);
+      if (isError(mean)) return mean;
+      const sd = numArg(args[2]);
+      if (isError(sd)) return sd;
+      if (sd <= 0 || x <= 0) return CellError.NUM;
+      return normCdf(excelSub(Math.log(x), mean) / sd);
+    },
+  },
+  {
+    name: 'TDIST',
+    params: [p.scalar('x'), p.scalar('deg_freedom'), p.scalar('tails')],
+    broadcast: true,
+    deprecatedAliasOf: 'T.DIST.2T',
+    summary: 'Returns the Student t-distribution, one- or two-tailed.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const df = intArg(args[1]);
+      if (isError(df)) return df;
+      const tails = intArg(args[2]);
+      if (isError(tails)) return tails;
+      // The old function is defined only on the right half of the axis.
+      if (x < 0 || df < 1 || (tails !== 1 && tails !== 2)) return CellError.NUM;
+      return tails * studentTSf(x, df);
+    },
+  },
+  {
+    name: 'BETADIST',
+    params: [
+      p.scalar('x'),
+      p.scalar('alpha'),
+      p.scalar('beta'),
+      p.scalar('A', true),
+      p.scalar('B', true),
+    ],
+    broadcast: true,
+    deprecatedAliasOf: 'BETA.DIST',
+    summary: 'Returns the cumulative beta probability density function.',
+    impl: (args) => {
+      const x = numArg(args[0]);
+      if (isError(x)) return x;
+      const alpha = numArg(args[1]);
+      if (isError(alpha)) return alpha;
+      const beta = numArg(args[2]);
+      if (isError(beta)) return beta;
+      const lower = numArg(args[3], 0);
+      if (isError(lower)) return lower;
+      const upper = numArg(args[4], 1);
+      if (isError(upper)) return upper;
+      if (alpha <= 0 || beta <= 0 || upper === lower) return CellError.NUM;
+      if (x < lower || x > upper) return CellError.NUM;
+      return betaI(alpha, beta, excelSub(x, lower) / excelSub(upper, lower));
+    },
+  },
+  {
+    name: 'NEGBINOMDIST',
+    params: [p.scalar('number_f'), p.scalar('number_s'), p.scalar('probability_s')],
+    broadcast: true,
+    deprecatedAliasOf: 'NEGBINOM.DIST',
+    summary: 'Returns the negative binomial distribution.',
+    impl: (args) => {
+      const f = intArg(args[0]);
+      if (isError(f)) return f;
+      const successes = intArg(args[1]);
+      if (isError(successes)) return successes;
+      const prob = numArg(args[2]);
+      if (isError(prob)) return prob;
+      if (f < 0 || successes < 1 || prob <= 0 || prob > 1) return CellError.NUM;
+      return Math.exp(
+        lnChoose(f + successes - 1, successes - 1) +
+          successes * Math.log(prob) +
+          f * Math.log1p(-prob),
+      );
+    },
+  },
+  {
+    name: 'HYPGEOMDIST',
+    params: [
+      p.scalar('sample_s'),
+      p.scalar('number_sample'),
+      p.scalar('population_s'),
+      p.scalar('number_pop'),
+    ],
+    broadcast: true,
+    deprecatedAliasOf: 'HYPGEOM.DIST',
+    summary: 'Returns the hypergeometric distribution.',
+    impl: (args) => {
+      const k = intArg(args[0]);
+      if (isError(k)) return k;
+      const n = intArg(args[1]);
+      if (isError(n)) return n;
+      const successes = intArg(args[2]);
+      if (isError(successes)) return successes;
+      const population = intArg(args[3]);
+      if (isError(population)) return population;
+      if (population <= 0 || n <= 0 || n > population) return CellError.NUM;
+      if (successes <= 0 || successes > population) return CellError.NUM;
+      if (k < Math.max(0, n - (population - successes)) || k > Math.min(n, successes)) {
+        return CellError.NUM;
+      }
+      return hypgeomPmf(k, n, successes, population);
+    },
+  },
+];
+
 export const STATISTICAL_FUNCTIONS: readonly FunctionSpec[] = [
   ...COUNTING,
   ...AVERAGES,
@@ -2844,4 +2958,5 @@ export const STATISTICAL_FUNCTIONS: readonly FunctionSpec[] = [
   ...CONTINUOUS,
   ...SPECIAL,
   ...HYPOTHESIS_TESTS,
+  ...COMPATIBILITY,
 ];

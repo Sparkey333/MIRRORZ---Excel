@@ -8,7 +8,15 @@
  * it is also the reason no component anywhere calls `require` or touches `fs`.
  */
 
-import { readXlsx, writeXlsx, parseDelimited } from '@mirrorz/formats';
+import {
+  looksLikeOds,
+  looksLikeXls,
+  parseDelimited,
+  readOds,
+  readXls,
+  readXlsx,
+  writeXlsx,
+} from '@mirrorz/formats';
 import { Document, Workbook } from '@mirrorz/core';
 import { Engine, createRegistry } from '@mirrorz/formula';
 import { AppController } from './controller.js';
@@ -98,7 +106,7 @@ export interface OpenResult {
  * pointing at cells that no longer exist.
  */
 export function openWorkbook(file: OpenedFile): OpenResult {
-  const result = readXlsx(file.data);
+  const result = readWorkbookBytes(file.data);
   const doc = new Document(result.workbook);
   const registry = createRegistry();
   const engine = new Engine(doc, registry);
@@ -107,6 +115,29 @@ export function openWorkbook(file: OpenedFile): OpenResult {
   controller.setFileName(file.name);
   controller.markSaved();
   return { controller, warnings: result.warnings };
+}
+
+/**
+ * Decide what a workbook actually is, by looking rather than by its name.
+ *
+ * The shell will hand us anything its dialog accepts, and that includes `.xls`
+ * and `.ods`. Reading every one of them as xlsx would throw on the two formats
+ * this application specifically advertises support for. The container is
+ * sniffed rather than taken from the extension for the same reason the command
+ * line does it: a `.xls` that is really a zip and an `.xlsx` that is really a
+ * compound file are both common, and the bytes cannot be wrong about it.
+ */
+function readWorkbookBytes(data: Uint8Array): { workbook: Workbook; warnings: string[] } {
+  if (looksLikeXls(data)) {
+    const read = readXls(data);
+    return { workbook: read.workbook, warnings: read.warnings };
+  }
+  if (looksLikeOds(data)) {
+    const read = readOds(data);
+    return { workbook: read.workbook, warnings: read.warnings };
+  }
+  const read = readXlsx(data);
+  return { workbook: read.workbook, warnings: read.warnings };
 }
 
 /** Parse a delimited file into rows, for the import review to inspect. */

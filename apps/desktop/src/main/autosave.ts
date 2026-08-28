@@ -174,6 +174,22 @@ interface PersistedIndex {
   records: IndexRecord[];
 }
 
+/**
+ * Whether a string is a path this module could have written.
+ *
+ * The index lives in the application's own data directory, and every path in it
+ * is one this process later hands to `remove()`. That makes the index the one
+ * place where a corrupted - or hand-edited - file on disk turns into an unlink
+ * of somebody else's file, so a record whose path is not shaped like a journal
+ * is dropped rather than acted on. Both journal locations end in the suffix, so
+ * the test costs nothing and there is no legitimate record it excludes.
+ */
+export function looksLikeJournalPath(path: string): boolean {
+  if (path.length === 0 || path.length > 4096) return false;
+  if (path.includes('\0')) return false;
+  return path.endsWith(JOURNAL_SUFFIX);
+}
+
 export function parseIndex(raw: string | null): IndexRecord[] {
   if (raw === null) return [];
   let value: unknown;
@@ -190,7 +206,7 @@ export function parseIndex(raw: string | null): IndexRecord[] {
     if (typeof record !== 'object' || record === null) continue;
     const r = record as Partial<IndexRecord>;
     if (typeof r.docId !== 'string' || typeof r.journalPath !== 'string') continue;
-    if (r.docId.length === 0 || r.journalPath.length === 0) continue;
+    if (r.docId.length === 0 || !looksLikeJournalPath(r.journalPath)) continue;
     out.push({ docId: r.docId, journalPath: r.journalPath });
   }
   return out;
@@ -286,7 +302,16 @@ export class AutosaveStore {
     for (const record of records) {
       const text = this.fs.readFile(record.journalPath);
       const journal = text === null ? null : decodeJournal(text);
-      if (!journal) continue;
+      if (!journal) {
+        // Unreadable or half-written. Drop the file as well as the index entry,
+        // or it sits beside the user's document forever with nothing to read it.
+        try {
+          this.fs.remove(record.journalPath);
+        } catch {
+          // Nothing useful to do about it.
+        }
+        continue;
+      }
       const file = journal.filePath ? this.fs.stat(journal.filePath) : null;
       const verdict = classifyJournal(journal, file, { now });
       if (verdict === 'stale' || verdict === 'superseded') {
@@ -305,9 +330,19 @@ export class AutosaveStore {
   }
 
   private record(docId: string, journalPath: string): void {
-    const records = this.readIndex().filter((r) => r.docId !== docId);
-    records.push({ docId, journalPath });
-    this.writeIndex(records);
+    const records = this.readIndex();
+    // A document that has just been saved under a name moves its journal from
+    // the recovery directory to beside the file; the old one has to go, or it
+    // reappears at the next launch describing a document already recovered.
+    for (const previous of records) {
+      if (previous.docId !== docId || previous.journalPath === journalPath) continue;
+      try {
+        this.fs.remove(previous.journalPath);
+      } catch {
+        // Best effort; a stale journal is caught by the age check eventually.
+      }
+    }
+    this.writeIndex([...records.filter((r) => r.docId !== docId), { docId, journalPath }]);
   }
 
   private readIndex(): IndexRecord[] {

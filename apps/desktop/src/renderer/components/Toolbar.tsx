@@ -48,7 +48,6 @@ export function Toolbar({ onOpenFile, onSave, onSaveAs }: {
   const snapshot = useApp();
   const [formatMenuOpen, setFormatMenuOpen] = useState(false);
   const [customCode, setCustomCode] = useState('');
-  const [findOpen, setFindOpen] = useState(false);
 
   const font = useDerived(() => controller.uniformStyle((s) => s.font));
   const numFmt = useDerived(() => controller.uniformStyle((s) => s.numFmt));
@@ -285,7 +284,7 @@ export function Toolbar({ onOpenFile, onSave, onSaveAs }: {
         >
           Z&#8594;A
         </button>
-        <button type="button" onClick={() => setFindOpen((open) => !open)} aria-expanded={findOpen}>
+        <button type="button" onClick={() => controller.setFind()} aria-expanded={snapshot.findOpen}>
           Find
         </button>
       </ToolbarGroup>
@@ -316,7 +315,7 @@ export function Toolbar({ onOpenFile, onSave, onSaveAs }: {
         </button>
       </ToolbarGroup>
 
-      {findOpen ? <FindReplace onClose={() => setFindOpen(false)} /> : null}
+      {snapshot.findOpen ? <FindReplace onClose={() => controller.setFind(false)} /> : null}
     </div>
   );
 }
@@ -372,12 +371,21 @@ function ColorPicker({
  * a private format.
  */
 async function copySelection(controller: AppController): Promise<void> {
-  const range = controller.selectionRange();
+  const raw = controller.selectionRange();
+  const sheet = controller.getSnapshot().activeSheet;
+  // Clamped to the used range. Clicking a column header selects 1,048,576
+  // addresses, and copying the empty million below the data would build a
+  // string of a million newlines and hang the window - Excel copies the used
+  // part of the column, and so do we.
+  const bounds = controller.sheet(sheet)?.bounds();
+  const endRow = bounds ? Math.min(raw.end.row, Math.max(bounds.maxRow, raw.start.row)) : raw.start.row;
+  const endCol = bounds ? Math.min(raw.end.col, Math.max(bounds.maxCol, raw.start.col)) : raw.start.col;
+
   const lines: string[] = [];
-  for (let r = range.start.row; r <= range.end.row; r++) {
+  for (let r = raw.start.row; r <= endRow; r++) {
     const cells: string[] = [];
-    for (let c = range.start.col; c <= range.end.col; c++) {
-      cells.push(controller.displayText({ sheet: controller.getSnapshot().activeSheet, row: r, col: c }));
+    for (let c = raw.start.col; c <= endCol; c++) {
+      cells.push(controller.displayText({ sheet, row: r, col: c }));
     }
     lines.push(cells.join('\t'));
   }

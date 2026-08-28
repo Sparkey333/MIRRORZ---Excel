@@ -69,7 +69,9 @@ describe('FormulaBar', () => {
     fireEvent.change(input, { target: { value: '=SU' } });
     input.setSelectionRange(3, 3);
     fireEvent.keyUp(input, { key: 'U' });
-    const offered = screen.queryAllByRole('option').map((o) => o.textContent?.replace(/\s/g, ''));
+    const offered = screen
+      .queryAllByRole('option')
+      .map((o) => o.querySelector('.mz-completion-name')?.textContent?.replace(/\s/g, ''));
     expect(offered.length).toBeGreaterThan(0);
     // Every suggestion is a name the engine will actually resolve, which is the
     // point of drawing the list from the registry rather than a hand-kept list.
@@ -88,7 +90,7 @@ describe('App', () => {
     expect(screen.getByLabelText('Sheet explorer')).toBeDefined();
   });
 
-  it('falls back to a DOM grid while the canvas grid package is absent', async () => {
+  it('falls back to a DOM grid when the canvas cannot paint', async () => {
     renderWith(() => <App />);
     await waitFor(() => expect(screen.getByLabelText('Sheet1 cells')).toBeDefined());
   });

@@ -159,7 +159,11 @@ function gather(
     for (const item of items(arg, ctx)) {
       const v = item.value;
       if (isError(v)) {
-        if (!ignoreErrors && !out.error) out.error = v;
+        if (ignoreErrors) continue;
+        // COUNTA counts an error cell as a value; every other aggregate reports
+        // it. Both need the cell seen, so it is recorded twice over.
+        out.nonEmpty++;
+        if (!out.error) out.error = v;
         continue;
       }
       if (v !== null) out.nonEmpty++;
@@ -259,6 +263,23 @@ function varianceOf(nums: readonly number[], sample: boolean): number | CellErro
   return ss / (sample ? n - 1 : n);
 }
 
+/**
+ * MAX and MIN.
+ *
+ * `Math.max(...nums)` passes every value as an argument and overflows the call
+ * stack somewhere above a hundred thousand of them, which a whole-column
+ * SUBTOTAL(4,A:A) reaches easily; a loop has no such ceiling.
+ */
+function extremeOf(nums: readonly number[], largest: boolean): number {
+  if (nums.length === 0) return 0;
+  let best = nums[0]!;
+  for (let i = 1; i < nums.length; i++) {
+    const n = nums[i]!;
+    if (largest ? n > best : n < best) best = n;
+  }
+  return best;
+}
+
 function medianOf(nums: readonly number[]): number | CellError {
   if (nums.length === 0) return CellError.NUM;
   const s = [...nums].sort((a, b) => a - b);
@@ -337,9 +358,9 @@ function applyAggregate(
     case 3:
       return g.nonEmpty;
     case 4:
-      return nums.length === 0 ? 0 : Math.max(...nums);
+      return extremeOf(nums, true);
     case 5:
-      return nums.length === 0 ? 0 : Math.min(...nums);
+      return extremeOf(nums, false);
     case 6:
       return productOf(nums);
     case 7: {
@@ -377,10 +398,18 @@ function applyAggregate(
   }
 }
 
-/** COUNT and COUNTA see a #VALUE!-producing direct text argument as ignorable. */
+/**
+ * The error an aggregate should report, if any.
+ *
+ * COUNT and COUNTA never report one: COUNT "ignores" arguments that are error
+ * values and COUNTA counts them as values, so SUBTOTAL(2,A1:A3) over a range
+ * holding #DIV/0! is a count, not #DIV/0!. Every other function number
+ * propagates, and only the counting pair also shrugs off direct text that will
+ * not convert.
+ */
 function errorFor(fn: number, g: Gathered): CellError | undefined {
-  if (g.error) return g.error;
-  return fn === 2 || fn === 3 ? undefined : g.conversionError;
+  if (fn === 2 || fn === 3) return undefined;
+  return g.error ?? g.conversionError;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +513,9 @@ const SUM: FunctionSpec = {
   impl: (args, ctx) => {
     const g = gather(args, ctx);
     const err = gatherError(g);
-    return err ?? sumOf(g.numbers);
+    // finite() and not the raw total: an overflow is #NUM! in Excel, and an
+    // Infinity is not a value a cell can hold at all.
+    return err ?? finite(sumOf(g.numbers));
   },
 };
 
@@ -533,7 +564,7 @@ function sumMatching(
     if (isError(v)) return v;
     if (typeof v === 'number') total = excelAdd(total, v);
   }
-  return total;
+  return finite(total);
 }
 
 const SUMIF: FunctionSpec = {
@@ -849,17 +880,31 @@ function modernRounder(
 // Combinatorics
 // ---------------------------------------------------------------------------
 
+/**
+ * Every product below stops the moment it leaves double range.
+ *
+ * Each accumulator grows monotonically, so once it is infinite the answer is
+ * #NUM! whatever the remaining factors are - and without the early exit
+ * FACT(1E15) would spin through a quadrillion multiplications of Infinity
+ * before saying so.
+ */
 function factorial(n: number): number | CellError {
   if (n < 0) return CellError.NUM;
   let acc = 1;
-  for (let i = 2; i <= n; i++) acc *= i;
+  for (let i = 2; i <= n; i++) {
+    acc *= i;
+    if (!Number.isFinite(acc)) return CellError.NUM;
+  }
   return acc;
 }
 
 function doubleFactorial(n: number): number | CellError {
   if (n < 0) return CellError.NUM;
   let acc = 1;
-  for (let i = n; i > 1; i -= 2) acc *= i;
+  for (let i = n; i > 1; i -= 2) {
+    acc *= i;
+    if (!Number.isFinite(acc)) return CellError.NUM;
+  }
   return acc;
 }
 
@@ -871,14 +916,25 @@ function combinations(n: number, k: number): number | CellError {
   if (n < 0 || k < 0 || k > n) return CellError.NUM;
   const m = Math.min(k, n - k);
   let acc = 1;
-  for (let i = 1; i <= m; i++) acc = (acc * (n - m + i)) / i;
+  for (let i = 1; i <= m; i++) {
+    acc = (acc * (n - m + i)) / i;
+    if (!Number.isFinite(acc)) return CellError.NUM;
+  }
   return Math.round(acc);
 }
 
+/**
+ * PERMUT's domain is narrower than COMBIN's: Microsoft documents #NUM! when
+ * `number` is less than *or equal to* zero, so PERMUT(0,0) is an error where
+ * COMBIN(0,0) is 1.
+ */
 function permutations(n: number, k: number): number | CellError {
-  if (n < 0 || k < 0 || k > n) return CellError.NUM;
+  if (n <= 0 || k < 0 || k > n) return CellError.NUM;
   let acc = 1;
-  for (let i = 0; i < k; i++) acc *= n - i;
+  for (let i = 0; i < k; i++) {
+    acc *= n - i;
+    if (!Number.isFinite(acc)) return CellError.NUM;
+  }
   return acc;
 }
 
@@ -910,10 +966,13 @@ function integerListFn(
       if (err) return err;
       let acc = seed;
       for (const raw of g.numbers) {
-        const n = Math.trunc(raw);
         // Excel refuses negatives outright and cannot hold an exact integer
         // beyond 2^53, where the answer would silently stop being a divisor.
-        if (n < 0 || n >= 2 ** 53) return CellError.NUM;
+        // The sign is judged before truncation, so -0.5 is a negative rather
+        // than the -0 that Math.trunc would make of it.
+        if (raw < 0) return CellError.NUM;
+        const n = Math.trunc(raw);
+        if (n >= 2 ** 53) return CellError.NUM;
         const next = reduce(acc, n);
         if (isError(next)) return next;
         acc = next;
@@ -1255,9 +1314,11 @@ export const MATH_FUNCTIONS: readonly FunctionSpec[] = [
   ),
   unary(
     'COTH',
+    // 1/tanh rather than cosh/sinh: past |x| of about 710 both of those are
+    // Infinity and their quotient is NaN, where the answer is plainly +-1.
     (x) => {
-      const s = Math.sinh(x);
-      return s === 0 ? CellError.DIV0 : Math.cosh(x) / s;
+      const t = Math.tanh(x);
+      return t === 0 ? CellError.DIV0 : 1 / t;
     },
     'Returns the hyperbolic cotangent of an angle.',
   ),

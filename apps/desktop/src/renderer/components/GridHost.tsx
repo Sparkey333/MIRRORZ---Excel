@@ -2,70 +2,128 @@
  * The grid's mounting point.
  *
  * The canvas grid lives in its own package; this component owns the canvas
- * element, tells the view about size and scroll, and translates its selection
+ * element, tells the view about size, theme and scroll, and translates its
  * events into controller calls. It knows nothing about how cells are drawn, and
  * the grid knows nothing about panels or the command palette.
  *
- * When the grid package is not present the fallback below renders a small DOM
- * grid instead. That is not a stub for its own sake: without it the whole shell
- * would be untestable and undemonstrable until another package lands, and a
- * shell you cannot run is a shell you cannot review.
+ * Every path out of here that changes data goes through the controller, and so
+ * through the Document's command log. The grid is given the Workbook to read and
+ * is never asked to write to it.
+ *
+ * The DOM fallback below is not a stub. A canvas with no 2d context - a test
+ * environment, a browser that has exhausted its contexts - would otherwise leave
+ * an empty rectangle where the sheet should be, which is the worst of the
+ * available failures because it looks like data loss.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { a1, colToName } from '@mirrorz/core';
 import { useApp, useController } from '../state/context.js';
-import { loadGridView, type GridViewLike } from '../grid/grid-api.js';
+import { GridBridge, canvasCanPaint, sameSelection } from '../grid/grid-api.js';
 import { containsCell, singleCell } from '../model/selection.js';
+import { resolveTheme } from '../model/theme.js';
+import { useSystemPrefersDark } from '../state/useTheme.js';
 
 export function GridHost() {
   const controller = useController();
   const snapshot = useApp();
+  const prefersDark = useSystemPrefersDark();
+  const dark = resolveTheme(snapshot.theme, prefersDark) === 'dark';
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<GridViewLike | null>(null);
+  const bridgeRef = useRef<GridBridge | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    let unsubscribe: (() => void) | undefined;
+  // Layout effect, not effect: the canvas has to be measured and painted before
+  // the browser shows the frame, or the first paint is a blank grid that fills
+  // in a tick later.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvasCanPaint(canvas) || !canvas) {
+      setAvailable(false);
+      return;
+    }
 
-    void loadGridView().then((GridView) => {
-      if (disposed) return;
-      const canvas = canvasRef.current;
-      if (!GridView || !canvas) {
-        setAvailable(false);
-        return;
-      }
-      const view = new GridView(canvas, controller.workbook, snapshot.activeSheet);
-      viewRef.current = view;
-      unsubscribe = view.onSelectionChange((selection) => controller.setSelection(selection));
-      setAvailable(true);
-      view.render();
+    let bridge: GridBridge;
+    try {
+      const container = containerRef.current;
+      bridge = new GridBridge(canvas, controller.workbook, controller.getSnapshot().activeSheet, {
+        dark,
+        width: container?.clientWidth ?? 0,
+        height: container?.clientHeight ?? 0,
+        dpr: typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1,
+      });
+    } catch {
+      // A grid that cannot be constructed is a reason to show the fallback, not
+      // a reason to show nothing.
+      setAvailable(false);
+      return;
+    }
+
+    bridgeRef.current = bridge;
+    const stopSelection = bridge.onSelectionChange((selection) => {
+      controller.setSelection(selection);
+    });
+    // Double click and F2 mean "edit this cell"; the formula bar is where the
+    // editing happens, so activation moves the selection and focuses it.
+    const stopActivate = bridge.onActivate((cell) => {
+      controller.selectCell(cell.row, cell.col);
+      const editor = document.querySelector<HTMLTextAreaElement>('.mz-formula-input');
+      editor?.focus();
     });
 
+    bridge.setSelection(controller.getSnapshot().selection);
+    setAvailable(true);
+    bridge.render();
+
     return () => {
-      disposed = true;
-      unsubscribe?.();
-      viewRef.current?.destroy?.();
-      viewRef.current = null;
+      stopSelection();
+      stopActivate();
+      bridge.destroy();
+      bridgeRef.current = null;
     };
-    // The view is constructed once; sheet changes go through setSheet below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
+  }, [controller, dark]);
+
+  // The document changed: refresh the cached geometry, then repaint. Version is
+  // the one number that says something actually changed.
+  useEffect(() => {
+    const bridge = bridgeRef.current;
+    if (!bridge) return;
+    bridge.setSheet(snapshot.activeSheet);
+    bridge.refresh();
+  }, [snapshot.activeSheet, snapshot.version, available]);
+
+  // Selection moved somewhere else - a palette jump, an inspector root, the
+  // keyboard map - and the grid has to follow it. The value comparison is what
+  // stops the grid's own event echoing back into it as a second selection.
+  useEffect(() => {
+    const bridge = bridgeRef.current;
+    if (!bridge) return;
+    if (sameSelection(bridge.currentSelection(), snapshot.selection)) return;
+    bridge.setSelection(snapshot.selection);
+    bridge.render();
+  }, [snapshot.selection]);
 
   useEffect(() => {
-    viewRef.current?.setSheet?.(snapshot.activeSheet);
-    viewRef.current?.render();
-  }, [snapshot.activeSheet, snapshot.version]);
+    const bridge = bridgeRef.current;
+    if (!bridge) return;
+    bridge.setTheme(dark);
+    bridge.render();
+  }, [dark, available]);
 
   useEffect(() => {
     const container = containerRef.current;
-    const view = viewRef.current;
-    if (!container || !view || typeof ResizeObserver === 'undefined') return;
+    if (!container || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
-      view.resize(container.clientWidth, container.clientHeight);
-      view.render();
+      const bridge = bridgeRef.current;
+      if (!bridge) return;
+      bridge.resize(
+        container.clientWidth,
+        container.clientHeight,
+        typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1,
+      );
+      bridge.render();
     });
     observer.observe(container);
     return () => observer.disconnect();
@@ -78,11 +136,41 @@ export function GridHost() {
         className="mz-grid-canvas"
         hidden={available !== true}
         onPointerDown={(e) => {
-          const view = viewRef.current;
-          if (!view) return;
+          const bridge = bridgeRef.current;
+          if (!bridge) return;
           const rect = e.currentTarget.getBoundingClientRect();
-          const hit = view.hitTest(e.clientX - rect.left, e.clientY - rect.top);
-          if (hit?.region === 'cell') controller.selectCell(hit.row, hit.col);
+          e.currentTarget.setPointerCapture?.(e.pointerId);
+          bridge.pointerDown(e.clientX - rect.left, e.clientY - rect.top, {
+            shift: e.shiftKey,
+            ctrl: e.ctrlKey,
+            meta: e.metaKey,
+          });
+          bridge.render();
+        }}
+        onPointerMove={(e) => {
+          const bridge = bridgeRef.current;
+          if (!bridge || e.buttons === 0) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          bridge.pointerMove(e.clientX - rect.left, e.clientY - rect.top);
+          bridge.render();
+        }}
+        onPointerUp={(e) => {
+          e.currentTarget.releasePointerCapture?.(e.pointerId);
+          bridgeRef.current?.pointerUp();
+        }}
+        onDoubleClick={(e) => {
+          const bridge = bridgeRef.current;
+          if (!bridge) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          bridge.doubleClick(e.clientX - rect.left, e.clientY - rect.top);
+        }}
+        onWheel={(e) => {
+          const bridge = bridgeRef.current;
+          if (!bridge) return;
+          // Pixel deltas straight through: the grid carries sub-pixel scroll
+          // offsets, and rounding to a row here would throw that away.
+          bridge.scrollBy(e.deltaX, e.deltaY);
+          bridge.render();
         }}
       />
       {available === false ? <FallbackGrid /> : null}

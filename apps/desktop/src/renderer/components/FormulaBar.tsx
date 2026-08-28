@@ -31,6 +31,7 @@ export function FormulaBar() {
   }, [committed, addr.sheet, addr.row, addr.col]);
 
   const functionNames = useMemo(() => controller.registry.names(), [controller]);
+  const summaries = useMemo(() => controller.functionSummaries(), [controller]);
 
   const label = describeSelection(snapshot.selection, a1);
 
@@ -70,6 +71,7 @@ export function FormulaBar() {
         height={height}
         onHeightChange={setHeight}
         functionNames={functionNames}
+        summaries={summaries}
         placeholder={`${addr.sheet}!${a1(addr.row, addr.col)}`}
         onChange={(next) => {
           setDraft(next);

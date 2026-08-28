@@ -167,6 +167,34 @@ describe('structural operations are ordinary commands', () => {
     expect(restored.tabColor).toBe('FFFF0000');
   });
 
+  it('undoes a tab colour, and clearing one', () => {
+    const d = doc();
+    d.addSheet('Data');
+
+    d.setSheetColor('Data', 'FFFF0000');
+    expect(d.workbook.getSheet('Data')!.tabColor).toBe('FFFF0000');
+    d.undo();
+    expect(d.workbook.getSheet('Data')!.tabColor).toBeUndefined();
+
+    d.redo();
+    expect(d.workbook.getSheet('Data')!.tabColor).toBe('FFFF0000');
+
+    // Clearing is an edit like any other and has to come back the same way.
+    d.setSheetColor('Data', undefined);
+    expect(d.workbook.getSheet('Data')!.tabColor).toBeUndefined();
+    d.undo();
+    expect(d.workbook.getSheet('Data')!.tabColor).toBe('FFFF0000');
+  });
+
+  it('does not log a tab colour that is already set', () => {
+    const d = doc();
+    d.addSheet('Data');
+    d.setSheetColor('Data', 'FF00FF00');
+    const before = d.allEntries().length;
+    d.setSheetColor('Data', 'FF00FF00');
+    expect(d.allEntries().length).toBe(before);
+  });
+
   it('restores a deleted sheet to its original position', () => {
     const d = doc();
     d.addSheet('A');
