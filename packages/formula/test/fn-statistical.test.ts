@@ -26,9 +26,10 @@
  *     and answers 2; LibreOffice answers #VALUE!.
  *   - MODE.SNGL with no repeated value. Excel documents #N/A; LibreOffice
  *     reports #VALUE!.
- *   - PERCENTRANK truncates to the requested number of places, so a rank of
- *     five ninths is 0.555 (this is the value in Microsoft's own help page);
- *     LibreOffice rounds and answers 0.556.
+ *   - PERCENTRANK truncates to the requested number of significant digits, so a
+ *     rank of five ninths is 0.555 (this is the value in Microsoft's own help
+ *     page); LibreOffice reads the argument the same way but rounds, and answers
+ *     0.556.
  *   - Almost every out-of-domain argument. Excel documents #NUM! for these and
  *     LibreOffice reports #VALUE! nearly across the board, so the error codes
  *     below follow the Microsoft function reference, not the oracle.
@@ -421,6 +422,21 @@ describe('order statistics', () => {
     expect(code('PERCENTRANK.INC(D!A1:A8,100)')).toBe('#N/A');
   });
 
+  it('counts significant digits, not decimal places, for the significance', () => {
+    // Microsoft describes the argument as "the number of significant digits for
+    // the returned percentage value", and LibreOffice reads it the same way.
+    // The two readings agree on every rank of 0.1 or more, so this needs a rank
+    // below that to say anything: the second of thirty-one values ranks one
+    // thirtieth, which is 0.0333 at three significant digits and 0.033 if the
+    // places after the point are counted instead.
+    const thirtyOne = `{${Array.from({ length: 31 }, (_, i) => i).join(',')}}`;
+    expect(calc(`PERCENTRANK.INC(${thirtyOne},1)`)).toBe(0.0333);
+    expect(calc(`PERCENTRANK.INC(${thirtyOne},1,5)`)).toBe(0.033333);
+    // The digits are still truncated rather than rounded: four sevenths to five
+    // significant digits keeps the 2 it starts with.
+    expect(calc('PERCENTRANK.INC(D!A1:A8,7,5)')).toBe(0.57142);
+  });
+
   it('gives a repeated value one rank rather than several', () => {
     // 4 appears twice; both occurrences share the rank of the first.
     expect(calc('PERCENTRANK.INC({1,4,4,7},4)')).toBe(0.333);
@@ -801,6 +817,22 @@ describe('the special functions the distributions rest on', () => {
     close('GAUSS(1.5)+0.5', 0.9331927987311419, 1e-14);
   });
 
+  it('keeps the t distribution accurate where the middle is nearly flat', () => {
+    // One degree of freedom is Cauchy, whose CDF is a closed form on the whole
+    // axis, so this checks the middle against something other than itself.
+    close('T.DIST(0.000000001,1,TRUE)', 0.5 + Math.atan(1e-9) / Math.PI, 1e-15);
+    close('T.DIST(-2.5,1,TRUE)', 0.5 + Math.atan(-2.5) / Math.PI, 1e-14);
+    // Near zero the CDF leaves a half at the rate of the density there, which
+    // for seven degrees of freedom is gamma(4)/(gamma(3.5) sqrt(7 pi)). A CDF
+    // that has lost its digits in the middle answers a flat 0.5 instead.
+    close('T.DIST(0.000000001,7,TRUE)', 0.5 + 1e-9 * 0.3849914508322668, 1e-15);
+    expect(calc('T.DIST(0,7,TRUE)')).toBe(0.5);
+    // The median of a symmetric distribution is its centre exactly, and the
+    // quantiles either side of it are exact reflections.
+    expect(calc('T.INV(0.5,7)')).toBe(0);
+    expect(calc('T.INV(0.25,2)')).toBe(-(calc('T.INV(0.75,2)') as number));
+  });
+
   it('sums a discrete distribution to one', () => {
     close('BINOM.DIST(10,10,0.3,TRUE)', 1, 1e-15);
     close('HYPGEOM.DIST(4,4,8,20,TRUE)', 1, 1e-14);
@@ -819,6 +851,11 @@ describe('the special functions the distributions rest on', () => {
     expect(calc('BINOM.INV(10,0.5,0)')).toBe(0);
     expect(calc('BINOM.INV(10,0.5,1)')).toBe(10);
     expect(calc('POISSON.DIST(0,0,TRUE)')).toBe(1);
+    // Microsoft's domain for probability_s is [0, 1], so a success that never
+    // happens is a legal question with the answer zero rather than a #NUM!.
+    expect(calc('NEGBINOM.DIST(0,1,0,FALSE)')).toBe(0);
+    expect(calc('NEGBINOM.DIST(3,2,0,TRUE)')).toBe(0);
+    expect(calc('NEGBINOMDIST(0,1,0)')).toBe(0);
     expect(calc('EXPON.DIST(0,3,TRUE)')).toBe(0);
     expect(calc('WEIBULL.DIST(0,2,1,TRUE)')).toBe(0);
   });
@@ -912,6 +949,20 @@ describe('the hypothesis tests', () => {
       'F.TEST(D!A1:A5,D!G1:G5)',
       calc('F.TEST(D!G1:G5,D!A1:A5)') as number,
       1e-14,
+    );
+  });
+
+  it('reads the F test off the tail the answer is made of', () => {
+    // Sample variances a million to one apart: 2.5 against 2,500,000. With four
+    // degrees of freedom on each side the smaller tail is I_z(2,2), which has
+    // the closed form z^2 (3 - 2z), so this is an independent value and not the
+    // other tail subtracted from one - a subtraction that leaves five correct
+    // digits of a probability near 6e-12.
+    const z = (4 * 1e-6) / (4 * 1e-6 + 4);
+    close('F.TEST({1,2,3,4,5},{1000,2000,3000,4000,5000})', 2 * z * z * (3 - 2 * z), 1e-14);
+    // And the answer cannot depend on which sample was handed over first.
+    expect(calc('F.TEST({1,2,3,4,5},{1000,2000,3000,4000,5000})')).toBe(
+      calc('F.TEST({1000,2000,3000,4000,5000},{1,2,3,4,5})'),
     );
   });
 

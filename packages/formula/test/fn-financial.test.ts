@@ -200,10 +200,9 @@ describe("Microsoft's documented examples: the annuity family", () => {
   it('NPER at the end of the period', () =>
     near('NPER(0.12/12,-100,-1000,10000)', 60.0821229, 6));
   it('NPER at the beginning of the period', () => {
-    // Microsoft prints this one to two decimals only, so the round trip
-    // through FV is what pins down the digits beyond them.
+    near('NPER(0.12/12,-100,-1000,10000,1)', 59.6738657, 7);
+    // And the round trip through FV pins the digits beyond the printed ones.
     const nper = num('NPER(0.12/12,-100,-1000,10000,1)');
-    expect(nper).toBeCloseTo(59.67, 2);
     near(`FV(0.12/12,${nper},-100,-1000,1)`, 10000, 6);
   });
   it('NPER with no future value', () => near('NPER(0.12/12,-100,-1000)', -9.57859404, 6));
@@ -226,6 +225,20 @@ describe("Microsoft's documented examples: the annuity family", () => {
 
 describe("Microsoft's documented examples: cash-flow series", () => {
   it('FVSCHEDULE', () => near('FVSCHEDULE(1,{0.09,0.11,0.1})', 1.33089, 5));
+  it('NPV', () => near('NPV(0.1,-10000,3000,4200,6800)', 1188.4434, 4));
+
+  // The IRR page's three worked examples, which between them exercise the
+  // default guess, a longer series and a supplied guess.
+  const business = '-70000,12000,15000,18000,21000,26000';
+  it('IRR after four years', () =>
+    near(`IRR({${business.split(',').slice(0, 5).join(',')}})`, -0.021244848, 8));
+  it('IRR after five years', () => near(`IRR({${business}})`, 0.086630948, 8));
+  it('IRR after two years, which needs the guess Microsoft supplies', () => {
+    near('IRR({-70000,12000,15000},-0.1)', -0.443506941, 8);
+    // Microsoft's own note: without that guess the default 10% does not reach
+    // a root inside the twenty tries, and the answer is #NUM!.
+    expect(code('IRR({-70000,12000,15000})')).toBe('#NUM!');
+  });
   it('MIRR over five years', () =>
     near('MIRR({-120000,39000,30000,21000,37000,46000},0.1,0.12)', 0.126094, 6));
   it('MIRR over three years', () =>
@@ -245,7 +258,12 @@ describe("Microsoft's documented examples: depreciation", () => {
   it('SYD in the last year', () => near('SYD(30000,7500,10,10)', 409.09, 2));
   it('DB in the first year', () => near('DB(1000000,100000,6,1,7)', 186083.33, 2));
   it('DB in the second year', () => near('DB(1000000,100000,6,2,7)', 259639.42, 2));
+  it('DB in the third year', () => near('DB(1000000,100000,6,3,7)', 176814.44, 2));
+  it('DB in the fourth year', () => near('DB(1000000,100000,6,4,7)', 120410.64, 2));
+  it('DB in the fifth year', () => near('DB(1000000,100000,6,5,7)', 81999.64, 2));
+  it('DB in the sixth year', () => near('DB(1000000,100000,6,6,7)', 55841.76, 2));
   it('DB in the stub year', () => near('DB(1000000,100000,6,7,7)', 15845.1, 2));
+  it('DDB by day', () => near('DDB(2400,300,10*365,1)', 1.315068493, 6));
   it('DDB by month', () => near('DDB(2400,300,10*12,1,2)', 40, 6));
   it('DDB by year', () => near('DDB(2400,300,10,1,2)', 480, 6));
   it('DDB at factor 1.5', () => near('DDB(2400,300,10,2,1.5)', 306, 6));
@@ -284,6 +302,10 @@ describe("Microsoft's documented examples: securities", () => {
     near(`YIELD(${d(2008, 2, 15)},${d(2016, 11, 15)},0.0575,95.04287,100,2,0)`, 0.065, 6));
   it('DURATION', () =>
     near(`DURATION(${d(2008, 1, 1)},${d(2016, 1, 1)},0.08,0.09,2,1)`, 5.993775, 6));
+  it('DURATION over a thirty-year bond', () =>
+    // The example the current DURATION page carries, which is a longer bond
+    // than the one MDURATION is documented against.
+    near(`DURATION(${d(2018, 7, 1)},${d(2048, 1, 1)},0.08,0.09,2,1)`, 10.9191453, 7));
   it('MDURATION', () =>
     near(`MDURATION(${d(2008, 1, 1)},${d(2016, 1, 1)},0.08,0.09,2,1)`, 5.73567, 5));
   it('ACCRINT', () =>
@@ -297,6 +319,14 @@ describe("Microsoft's documented examples: securities", () => {
       `ACCRINT(${d(2008, 3, 5)},${d(2008, 9, 1)},${d(2008, 5, 1)},0.1,1000,2,0,FALSE)`,
       15.55555556,
       6,
+    ));
+  it('ACCRINT from an issue date after the settlement of the example above', () =>
+    // The third row of the ACCRINT page: issue 5 April 2008, everything else
+    // as in the first example.
+    near(
+      `ACCRINT(${d(2008, 4, 5)},${d(2008, 9, 1)},${d(2008, 5, 1)},0.1,1000,2,0,TRUE)`,
+      7.2222222,
+      7,
     ));
   it('ACCRINTM', () =>
     near(`ACCRINTM(${d(2008, 4, 1)},${d(2008, 6, 15)},0.1,1000,3)`, 20.54794521, 7));
@@ -473,6 +503,36 @@ describe('round-trip identities', () => {
       const price = num(`PRICE(${bond.replace('%', '0.052')})`);
       const yld = num(`YIELD(${bond.replace('%', String(price))})`);
       expect(yld, `frequency ${frequency} basis ${basis}`).toBeCloseTo(0.052, 8);
+    }
+  });
+
+  it('discounts the final coupon period by DSR/E, not by (E-A)/E', () => {
+    // Microsoft defines the one-coupon-period forms of PRICE and YIELD in
+    // terms of DSR, the days from settlement to redemption - which is
+    // COUPDAYSNC - and E, the days in the coupon period. On bases 2 and 3 the
+    // two halves of the period are counted in actual days while the whole is
+    // the convention's 360 or 365 over the frequency, so DSR is emphatically
+    // not E - A, and substituting one for the other misprices the bond.
+    for (const basis of [2, 3]) {
+      const coupon = `${d(2024, 1, 15)},${d(2024, 5, 1)},2,${basis}`;
+      const a = num(`COUPDAYBS(${coupon})`);
+      const e = num(`COUPDAYS(${coupon})`);
+      const dsr = num(`COUPDAYSNC(${coupon})`);
+      expect(num(`COUPNUM(${coupon})`), `basis ${basis}`).toBe(1);
+      expect(dsr, `basis ${basis} must not agree with E - A`).not.toBe(e - a);
+
+      const bond = `${d(2024, 1, 15)},${d(2024, 5, 1)},0.06,%,100,2,${basis}`;
+      const periodic = (100 * 0.06) / 2;
+      const expected = (100 + periodic) / (1 + (dsr / e) * (0.048 / 2)) - periodic * (a / e);
+      const price = num(`PRICE(${bond.replace('%', '0.048')})`);
+      expect(price, `PRICE on basis ${basis}`).toBeCloseTo(expected, 9);
+
+      // And YIELD's closed-form inversion, written straight from the page.
+      const carried = price / 100 + (a / e) * (0.06 / 2);
+      const documented = ((100 / 100 + 0.06 / 2 - carried) / carried) * 2 * (e / dsr);
+      expect(num(`YIELD(${bond.replace('%', String(price))})`), `YIELD on basis ${basis}`)
+        .toBeCloseTo(documented, 9);
+      expect(num(`YIELD(${bond.replace('%', String(price))})`)).toBeCloseTo(0.048, 9);
     }
   });
 
@@ -687,6 +747,15 @@ describe('solvers fail the way Excel fails', () => {
     expect(code('MIRR({-100,-50,-60},0.1,0.12)')).toBe('#DIV/0!');
   });
 
+  it('discounts a one-flow XNPV schedule rather than refusing it', () => {
+    // Microsoft documents exactly one shape error for XNPV - values and dates
+    // of different lengths - so a lone flow on its own date is a schedule, and
+    // it sits at time zero, undiscounted. XIRR is the one that needs two, and
+    // it refuses for want of a sign change rather than for want of a length.
+    expect(num(`XNPV(0.1,{100},{${d(2020, 1, 1)}})`)).toBe(100);
+    expect(code(`XIRR({100},{${d(2020, 1, 1)}})`)).toBe('#NUM!');
+  });
+
   it('rejects an XNPV schedule that is not aligned or not increasing', () => {
     expect(code(`XNPV(0.1,{-100,110},{${d(2020, 1, 1)}})`)).toBe('#NUM!');
     // A date before the first one has a negative exponent Excel refuses.
@@ -744,6 +813,26 @@ describe('argument-domain errors in depreciation', () => {
     expect(code(`AMORLINC(2400,${d(2008, 8, 19)},${d(2008, 12, 31)},2500,1,0.15,1)`)).toBe(
       '#NUM!',
     );
+  });
+
+  it('rejects the asset lives AMORDEGRC has no statutory coefficient for', () => {
+    // The coefficient table covers a life of three to four years, five to six,
+    // and more than six. Microsoft documents every gap in it - a life between
+    // 0 and 1, 1 and 2, 2 and 3, or 4 and 5 - as #NUM!, so a life of 4.5 must
+    // not quietly borrow the 1.5 that belongs to four years.
+    const asset = `2400,${d(2008, 8, 19)},${d(2008, 12, 31)},300`;
+    for (const [rate, life] of [
+      [1.5, '0.67'],
+      [0.6, '1.67'],
+      [0.5, '2'],
+      [0.4, '2.5'],
+      [1 / 4.5, '4.5'],
+    ] as Array<[number, string]>) {
+      expect(code(`AMORDEGRC(${asset},1,${rate},1)`), `life ${life}`).toBe('#NUM!');
+    }
+    // Four and five years sit on the edges of that gap and are both defined.
+    expect(num(`AMORDEGRC(${asset},1,0.25,1)`)).toBe(776);
+    expect(num(`AMORDEGRC(${asset},1,0.2,1)`)).toBe(820);
   });
 
   it('runs AMORLINC off the end of the schedule to zero', () => {
@@ -828,6 +917,10 @@ describe('argument-domain errors in the securities functions', () => {
     expect(code(`CUMIPMT(0,360,125000,1,12,0)`)).toBe('#NUM!');
     expect(code(`CUMIPMT(${loan},0,12,0)`)).toBe('#NUM!');
     expect(code(`CUMIPMT(${loan},13,12,0)`)).toBe('#NUM!');
+    // Not on Microsoft's published list, which stops at start_period and
+    // end_period being at least 1 and in order; a span running off the end of
+    // the schedule is rejected here for the same reason IPMT rejects a period
+    // past nper, since there is no payment there to attribute anything to.
     expect(code(`CUMIPMT(${loan},1,361,0)`)).toBe('#NUM!');
     // A type that is neither 0 nor 1 is accepted everywhere else and rejected
     // here, which is a documented quirk rather than an oversight.

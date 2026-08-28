@@ -358,16 +358,22 @@ function quartileOf(nums: readonly number[], q: number, inclusive: boolean): num
 }
 
 /**
- * Truncate a percent rank to `significance` places.
+ * Truncate a percent rank to `significance` significant digits.
  *
- * Microsoft documents the default as "three digits (0.xxx)", which reads as
- * decimal places rather than significant digits, and truncates rather than
- * rounds - PERCENTRANK of a value two thirds of the way up a list is 0.666, not
- * 0.667. The two readings only differ for ranks below 0.1, which is the one
- * case worth knowing about here.
+ * Two decisions, and the documentation settles both. Microsoft describes the
+ * argument as "the number of significant digits for the returned percentage
+ * value", so a rank of one thirtieth at the default significance is 0.0333 and
+ * not the 0.033 that counting decimal places would give; the two readings agree
+ * on every rank of 0.1 or more, which is why the difference is easy to miss.
+ * And the rounding is a truncation, not a round to nearest - Microsoft's own
+ * help page prints 0.555 for a rank of five ninths, where rounding would print
+ * 0.556.
  */
 function truncateRank(value: number, significance: number): number {
-  const scale = 10 ** significance;
+  if (value === 0) return 0;
+  // The exponent of the leading digit, so that `significance` of them survive.
+  const leading = Math.floor(Math.log10(Math.abs(value)));
+  const scale = 10 ** (significance - 1 - leading);
   return Math.floor(value * scale) / scale;
 }
 
@@ -1072,9 +1078,27 @@ function chiSqPdf(x: number, df: number): number {
   return Math.exp((k - 1) * Math.log(x) - x / 2 - k * Math.LN2 - lnGamma(k));
 }
 
+/**
+ * The Student t CDF, written two ways because neither form holds its digits
+ * over the whole axis.
+ *
+ * The tail form uses z = df/(df + x^2), which is small out where the tail
+ * probability is small, so I_z(df/2, 1/2) is computed as a small number rather
+ * than as the difference of two numbers near one. The same z is useless in the
+ * middle: at |x| = 1e-8 with df = 7 it is 1 - 1.4e-17, which rounds to exactly
+ * one, and the CDF flattens to exactly 0.5 for every x below about 1e-8 - which
+ * is why inverting it for the median used to land 2e-8 away from zero instead of
+ * on it. The central form runs the same incomplete beta on
+ * y = x^2/(df + x^2) instead, which keeps every digit of the departure from a
+ * half, and the two agree to the last bit where they meet at y = 1/2.
+ */
 function studentTCdf(x: number, df: number): number {
-  const z = df / (df + x * x);
-  const half = betaI(df / 2, 0.5, z) / 2;
+  const xx = x * x;
+  if (xx < df) {
+    const half = betaI(0.5, df / 2, xx / (df + xx)) / 2;
+    return x < 0 ? 0.5 - half : 0.5 + half;
+  }
+  const half = betaI(df / 2, 0.5, df / (df + xx)) / 2;
   return x <= 0 ? half : 1 - half;
 }
 
@@ -2142,12 +2166,18 @@ const STUDENT_T: FunctionSpec[] = [
       const df = intArg(args[1]);
       if (isError(df)) return df;
       if (df < 1 || prob <= 0 || prob >= 1) return CellError.NUM;
-      return invertCdf(
-        (x) => studentTCdf(x, df),
-        prob,
-        Number.NEGATIVE_INFINITY,
-        Number.POSITIVE_INFINITY,
-      );
+      // Solved on whichever tail is the smaller, then signed, rather than
+      // bisected against the CDF directly. The t distribution is symmetric
+      // about zero, so this makes T.INV(p) and -T.INV(1-p) the same double, and
+      // it puts the median exactly at zero: a bisection that has to creep up on
+      // zero from a bracket of width six stops at the iteration cap, not at the
+      // answer.
+      if (prob === 0.5) return 0;
+      const upper = prob > 0.5;
+      const tail = upper ? 1 - prob : prob;
+      const t = invertCdf((x) => -studentTSf(x, df), -tail, 0, Number.POSITIVE_INFINITY);
+      if (isError(t)) return t;
+      return upper ? t : -t;
     },
   },
   {
@@ -2384,7 +2414,9 @@ const DISCRETE: FunctionSpec[] = [
       if (isError(prob)) return prob;
       const cumulative = boolArg(args[3], true);
       if (isError(cumulative)) return cumulative;
-      if (f < 0 || s < 1 || prob <= 0 || prob > 1) return CellError.NUM;
+      // Microsoft's domain is probability_s < 0 or > 1, so a success
+      // probability of exactly zero is legal and the answer is a plain zero.
+      if (f < 0 || s < 1 || prob < 0 || prob > 1) return CellError.NUM;
       if (cumulative) return betaI(s, f + 1, prob);
       return Math.exp(
         lnChoose(f + s - 1, s - 1) + s * Math.log(prob) + f * Math.log1p(-prob),
@@ -2769,11 +2801,19 @@ const HYPOTHESIS_TESTS: FunctionSpec[] = [
       if (isError(v2)) return v2;
       if (v1 === 0 || v2 === 0) return CellError.DIV0;
       const ratio = v1 / v2;
-      let tail = fSf(ratio, xs.length - 1, ys.length - 1);
+      const df1 = xs.length - 1;
+      const df2 = ys.length - 1;
       // The statistic may land in either tail depending on which sample happened
-      // to be more variable; the reported probability is always two-sided.
-      if (tail > 0.5) tail = 1 - tail;
-      return 2 * tail;
+      // to be more variable; the reported probability is always twice the
+      // smaller tail. Both tails are evaluated directly rather than one of them
+      // as 1 minus the other, because the small one is exactly what the answer
+      // is made of: with array1 the tenth as variable as array2 the subtraction
+      // leaves five correct digits of a probability near 6e-12, and it also
+      // costs the test the symmetry in its two arguments that it is supposed to
+      // have.
+      const left = fCdf(ratio, df1, df2);
+      const right = fSf(ratio, df1, df2);
+      return 2 * Math.min(left, right);
     },
   },
   {
@@ -2903,7 +2943,7 @@ const COMPATIBILITY: FunctionSpec[] = [
       if (isError(successes)) return successes;
       const prob = numArg(args[2]);
       if (isError(prob)) return prob;
-      if (f < 0 || successes < 1 || prob <= 0 || prob > 1) return CellError.NUM;
+      if (f < 0 || successes < 1 || prob < 0 || prob > 1) return CellError.NUM;
       return Math.exp(
         lnChoose(f + successes - 1, successes - 1) +
           successes * Math.log(prob) +

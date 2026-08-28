@@ -174,9 +174,13 @@ function toNumeral(
   if (value < -span / 2 || value >= span / 2) return CellError.NUM;
   const text = (value < 0 ? value + span : value).toString(radix).toUpperCase();
 
-  if (value < 0 || placesArg === undefined || scalarArg(placesArg) === null) return text;
+  if (placesArg === undefined || scalarArg(placesArg) === null) return text;
+  // The type check happens even when the value is negative: Excel converts the
+  // argument before it decides to ignore it, so DEC2BIN(-1,"x") is #VALUE!
+  // while DEC2BIN(-1,2) is the full ten digits.
   const places = engInteger(placesArg);
   if (isError(places)) return places;
+  if (value < 0) return text;
   // Ten digits is the whole representable width, so a wider request has no
   // meaning and Excel refuses it rather than padding past the sign bit.
   if (places <= 0 || places > 10 || places < text.length) return CellError.NUM;
@@ -713,15 +717,13 @@ const IMTAN = complexSpec('IMTAN', 'The tangent of a complex number.', (z) => {
   return { re: Math.sin(2 * z.re) / denominator, im: Math.sinh(2 * z.im) / denominator };
 });
 
-// IMCOT arrived in Excel 2013 and so is stored prefixed, but it is missing from
-// the registry's FUTURE_FUNCTIONS list, which is not this module's to edit.
-const IMCOT: FunctionSpec = {
-  ...complexSpec('IMCOT', 'The cotangent of a complex number.', (z) => {
-    const denominator = Math.cosh(2 * z.im) - Math.cos(2 * z.re);
-    return { re: Math.sin(2 * z.re) / denominator, im: -Math.sinh(2 * z.im) / denominator };
-  }),
-  futureFunction: true,
-};
+// IMCOT arrived in Excel 2013 alongside IMSEC and IMCSC, so it is stored
+// prefixed; the registry's FUTURE_FUNCTIONS list now says so, which is what the
+// xlsx writer consults.
+const IMCOT = complexSpec('IMCOT', 'The cotangent of a complex number.', (z) => {
+  const denominator = Math.cosh(2 * z.im) - Math.cos(2 * z.re);
+  return { re: Math.sin(2 * z.re) / denominator, im: -Math.sinh(2 * z.im) / denominator };
+});
 
 const IMSEC = complexSpec('IMSEC', 'The secant of a complex number.', (z) => {
   const denominator = Math.cos(2 * z.re) + Math.cosh(2 * z.im);
@@ -890,24 +892,96 @@ function integrate(f: (t: number) => number, a: number, b: number, panels: numbe
 }
 
 /**
+ * The largest number of kernel evaluations any one Bessel call may spend.
+ *
+ * Both quadratures below need work proportional to x, so without a ceiling a
+ * single cell holding BESSELY(1E9,0) would run for the better part of an hour.
+ * Everything past the ceiling is served by the asymptotic expansion instead,
+ * which costs nothing and is more accurate there anyway.
+ */
+const BESSEL_WORK_LIMIT = 1 << 21;
+
+/** The smallest power of two at least `v`, clamped to the work limit. */
+function pow2AtLeast(v: number): number {
+  let n = 64;
+  while (n < v && n < BESSEL_WORK_LIMIT) n *= 2;
+  return n;
+}
+
+/**
  * The trapezoidal rule over one period of an analytic periodic integrand, which
  * converges geometrically: for the Bessel integrals the truncation error is
  * J_(N-n)(x) + J_(N+n)(x), and once N is comfortably past x + n that is below
- * the rounding level. The node count doubles until two successive answers agree,
- * so the accuracy is checked rather than assumed.
+ * the rounding level. The node count starts where that is already true and then
+ * doubles until two successive answers agree, so the accuracy is checked rather
+ * than assumed.
+ *
+ * The starting count matters: a fixed one silently returns the unconverged
+ * answer for a large argument, and J_0(20000) computed on 8192 nodes is not
+ * merely inaccurate, it is three times larger than J_0 can ever be.
  */
-function periodicMean(kernel: (theta: number) => number): number {
+function periodicMean(kernel: (theta: number) => number, start: number): number {
   let previous = Number.NaN;
-  for (let n = 64; n <= 8192; n *= 2) {
+  let mean = Number.NaN;
+  for (let n = pow2AtLeast(start); n <= BESSEL_WORK_LIMIT; n *= 2) {
     let sum = 0;
     for (let k = 0; k < n; k++) sum += kernel((2 * Math.PI * k) / n);
-    const mean = sum / n;
+    mean = sum / n;
     if (Number.isFinite(previous) && Math.abs(mean - previous) <= 1e-16 * Math.max(1, Math.abs(mean))) {
       return mean;
     }
     previous = mean;
   }
-  return previous;
+  return mean;
+}
+
+/**
+ * Hankel's asymptotic expansion, which gives J_n and Y_n together:
+ *
+ *   J_n(x) = sqrt(2/(pi x)) (P cos w - Q sin w),
+ *   Y_n(x) = sqrt(2/(pi x)) (P sin w + Q cos w),   w = x - (n/2 + 1/4) pi,
+ *
+ * with P the even and Q the odd part of the series whose k-th term is
+ * prod_(j<=k) (4n^2 - (2j-1)^2) / (k! (8x)^k), signed (-1)^floor(k/2). The
+ * series diverges eventually, so it is summed only while its terms shrink; the
+ * error is then bounded by the first term dropped, which for x >= 1000 and
+ * 4n^2 <= x is far below the rounding level. The only real error left is the
+ * phase: w loses the last bits of x, so a result near a zero of J or Y carries
+ * an absolute error of about ulp(x) times the amplitude. Excel's own
+ * approximations have the same limit and a far worse one besides.
+ */
+function hankel(x: number, n: number): { j: number; y: number } {
+  const mu = 4 * n * n;
+  let p = 1;
+  let q = 0;
+  let term = 1;
+  let smallest = Number.POSITIVE_INFINITY;
+  for (let k = 1; k <= 200; k++) {
+    term *= (mu - (2 * k - 1) ** 2) / (k * 8 * x);
+    const size = Math.abs(term);
+    if (size > smallest) break;
+    smallest = size;
+    const sign = k % 4 === 1 || k % 4 === 0 ? 1 : -1;
+    if (k % 2 === 1) q += sign * term;
+    else p += sign * term;
+    if (size < 1e-19) break;
+  }
+  const phase = x - (n / 2 + 0.25) * Math.PI;
+  const amplitude = Math.sqrt(2 / (Math.PI * x));
+  const cos = Math.cos(phase);
+  const sin = Math.sin(phase);
+  return { j: amplitude * (p * cos - q * sin), y: amplitude * (p * sin + q * cos) };
+}
+
+/**
+ * Where the asymptotic expansion is the better of the two.
+ *
+ * Its terms only shrink while 4n^2 stays under 8x, and by x = 1000 it agrees
+ * with the quadrature to a few parts in 10^14; below that the quadrature is
+ * both cheap and exact, so there is nothing to gain by switching earlier.
+ */
+function asymptoticApplies(x: number, n: number): boolean {
+  return x >= 1000 && 4 * n * n <= x;
 }
 
 /**
@@ -932,8 +1006,16 @@ function besselJSeries(x: number, n: number): number {
 }
 
 function besselJ(x: number, n: number): number {
-  if (x * x <= 4 * (n + 1)) return besselJSeries(x, n);
-  return periodicMean((theta) => Math.cos(n * theta - x * Math.sin(theta)));
+  // J_n(-x) = (-1)^n J_n(x), so only the positive half needs a method.
+  const ax = Math.abs(x);
+  const sign = x < 0 && n % 2 === 1 ? -1 : 1;
+  if (ax * ax <= 4 * (n + 1)) return sign * besselJSeries(ax, n);
+  // The trapezoid needs a node for every radian of phase and then some; past
+  // the work ceiling the asymptotic expansion takes over, exactly as it does
+  // for Y, rather than the quadrature quietly returning an unconverged answer.
+  const nodes = 4 * (ax + n) + 64;
+  if (asymptoticApplies(ax, n) || nodes > BESSEL_WORK_LIMIT) return sign * hankel(ax, n).j;
+  return sign * periodicMean((theta) => Math.cos(n * theta - ax * Math.sin(theta)), nodes);
 }
 
 /**
@@ -957,22 +1039,48 @@ function besselI(x: number, n: number): number {
   return x < 0 && n % 2 === 1 ? -sum : sum;
 }
 
+/** How many nats below its peak an exponent may fall before it stops mattering. */
+const DECAY_NATS = 50;
+
 /**
  * Where to cut off an integrand of the form e^(n*t - x*g(t)).
  *
  * The exponent peaks where x*g'(t) = n and then falls; integrating past the
  * point where it has fallen fifty nats below the peak adds nothing a double can
- * hold. Stepping rather than solving keeps this correct for both the g = sinh
- * and g = cosh cases without a second inverse function.
+ * hold. The cut-off has to be tight, not merely sufficient: for x = 20000 the
+ * whole of e^(-x sinh t) lives inside t < 0.0025, and a limit rounded up to 0.5
+ * hands the quadrature a range four hundred times wider than the integrand,
+ * which then integrates the spike with a single node and loses six digits of
+ * Y_0. So the crossing is bracketed by doubling and then bisected, which is
+ * bounded work and lands on the exact point.
  */
 function decayLimit(exponent: (t: number) => number, peak: number): number {
   const top = exponent(peak);
-  let t = peak;
-  while (t < 720) {
-    t += 0.5;
-    if (exponent(t) < top - 50) break;
+  const target = top - DECAY_NATS;
+  const ceiling = 750;
+  let offset = 1e-12;
+  while (peak + offset < ceiling && exponent(peak + offset) > target) offset *= 2;
+  let lo = peak;
+  let hi = Math.min(peak + offset, ceiling);
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (mid <= lo || mid >= hi) break;
+    if (exponent(mid) > target) lo = mid;
+    else hi = mid;
   }
-  return t;
+  return hi;
+}
+
+/**
+ * Panels enough to resolve an exponential integrand over [0, limit].
+ *
+ * What has to be resolved is the exponent's swing, not the width of the
+ * interval: two nats per panel leaves sixteen Gauss-Legendre nodes with an
+ * almost straight integrand to fit.
+ */
+function decayPanels(exponent: (t: number) => number, peak: number): number {
+  const swing = exponent(peak) - exponent(0) + DECAY_NATS;
+  return Math.min(4096, Math.max(16, Math.ceil(swing / 2)));
 }
 
 /**
@@ -985,12 +1093,12 @@ function decayLimit(exponent: (t: number) => number, peak: number): number {
  * needs only a short range.
  */
 function besselY(x: number, n: number): number {
-  const oscillatory = integrate(
-    (t) => Math.sin(x * Math.sin(t) - n * t),
-    0,
-    Math.PI,
-    Math.max(16, Math.ceil(x + 1.6 * n) + 8),
-  );
+  const panels = Math.max(16, Math.ceil(x + 1.6 * n) + 8);
+  // Past the ceiling the oscillatory panel count is the whole cost, and the
+  // asymptotic expansion is both free and better.
+  if (asymptoticApplies(x, n) || panels * 16 > BESSEL_WORK_LIMIT) return hankel(x, n).y;
+
+  const oscillatory = integrate((t) => Math.sin(x * Math.sin(t) - n * t), 0, Math.PI, panels);
 
   const sign = n % 2 === 0 ? 1 : -1;
   const exponent = (t: number): number => n * t - x * Math.sinh(t);
@@ -1000,7 +1108,7 @@ function besselY(x: number, n: number): number {
     (t) => (Math.exp(n * t) + sign * Math.exp(-n * t)) * Math.exp(-x * Math.sinh(t)),
     0,
     limit,
-    Math.max(16, Math.ceil(limit * 4)),
+    decayPanels(exponent, peak),
   );
 
   return (oscillatory - decaying) / Math.PI;
@@ -1015,7 +1123,7 @@ function besselK(x: number, n: number): number {
     (t) => Math.exp(-x * Math.cosh(t)) * Math.cosh(n * t),
     0,
     limit,
-    Math.max(16, Math.ceil(limit * 4)),
+    decayPanels(exponent, peak),
   );
 }
 

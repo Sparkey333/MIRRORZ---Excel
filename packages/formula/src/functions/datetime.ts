@@ -26,10 +26,10 @@
  * that computes a year uses it.
  *
  * Fifth, the two 30/360 conventions are genuinely different and are implemented
- * separately. DAYS360's US method leaves a 31st alone unless the start day is
- * already the 30th; YEARFRAC basis 0 is the NASD rule, which additionally folds
- * the last day of February onto the 30th. Sharing one routine between them -
- * the usual shortcut - disagrees with Excel across every February.
+ * separately. Both fold the last day of February onto the 30th, but DAYS360's
+ * US method folds only the start date, while YEARFRAC's NASD basis also folds
+ * the end date when the start was folded. So DAYS360(28 Feb 2015, 29 Feb 2016)
+ * is 359 while YEARFRAC over the same interval on basis 0 is exactly 1.
  *
  * Sixth, the working-day walkers jump whole weeks whenever no holiday falls
  * inside the jump. WORKDAY(date, 100000) is a legitimate formula and stepping
@@ -409,31 +409,33 @@ function isoWeekNumber(serial: number, system: DateSystem): number {
 // Day-count conventions
 // ---------------------------------------------------------------------------
 
-function days360(from: Ymd, to: Ymd, european: boolean): number {
+function days360(from: Ymd, to: Ymd, european: boolean, system: DateSystem): number {
   let d1 = from.day;
   let d2 = to.day;
   let m2 = to.month;
   let y2 = to.year;
 
-  if (european) {
-    if (d1 === 31) d1 = 30;
-    if (d2 === 31) d2 = 30;
-  } else {
-    // The US method never folds the end of February onto the 30th - that rule
-    // belongs to NASD 30/360, which YEARFRAC basis 0 uses and DAYS360 does not.
-    if (d1 === 31) d1 = 30;
-    if (d2 === 31) {
-      if (d1 === 30) {
-        d2 = 30;
-      } else {
-        // "the ending date becomes the 1st of the next month", which is what
-        // leaving a 31 in place amounts to arithmetically.
-        d2 = 1;
-        m2 += 1;
-        if (m2 > 12) {
-          m2 = 1;
-          y2 += 1;
-        }
+  if (d1 === 31) {
+    d1 = 30;
+  } else if (!european && isLastDayOfFebruary(from, system)) {
+    // The US method folds the last day of February onto the 30th, which is why
+    // Microsoft's own documentation warns that 28 February to 28 March returns
+    // 28 rather than the 30 a "full month" would suggest. Only the start date
+    // is folded: the end of February is left alone, which is where DAYS360 and
+    // YEARFRAC's NASD basis part company.
+    d1 = 30;
+  }
+
+  if (d2 === 31) {
+    if (european || d1 === 30) {
+      d2 = 30;
+    } else {
+      // "the ending date becomes the 1st of the next month".
+      d2 = 1;
+      m2 += 1;
+      if (m2 > 12) {
+        m2 = 1;
+        y2 += 1;
       }
     }
   }
@@ -441,7 +443,13 @@ function days360(from: Ymd, to: Ymd, european: boolean): number {
   return (y2 - from.year) * 360 + (m2 - from.month) * 30 + (d2 - d1);
 }
 
-/** NASD 30/360, the convention behind YEARFRAC basis 0. */
+/**
+ * NASD 30/360, the convention behind YEARFRAC basis 0.
+ *
+ * The difference from DAYS360's US method is the second fold: the end date
+ * moves to the 30th when it too is the last day of February, so a whole number
+ * of years between two ends of February comes out exact.
+ */
 function days360Nasd(from: Ymd, to: Ymd, system: DateSystem): number {
   let d1 = from.day;
   let d2 = to.day;
@@ -609,8 +617,11 @@ function advanceWorkdays(
 
   while (remaining > 0) {
     // A whole-week jump keeps the weekday and so passes exactly perWeek working
-    // days, provided no holiday sits inside the span it skips over.
-    const weeks = Math.floor(remaining / perWeek);
+    // days, provided no holiday sits inside the span it skips over. At least one
+    // working day is always left for the day-at-a-time walk below, because the
+    // result has to *land* on a working day: jumping the last week from a
+    // Saturday start would return the following Saturday.
+    const weeks = Math.floor((remaining - 1) / perWeek);
     if (weeks > 0 && !holidayInSpan(cur + step, cur + step * weeks * 7)) {
       cur += step * weeks * 7;
       remaining -= weeks * perWeek;
@@ -964,8 +975,8 @@ const DAYS360: FunctionSpec = {
     if (isError(european)) return european;
     const system = ctx.dateSystem;
     // A reversed interval is negated rather than rejected.
-    if (start > end) return -days360(ymd(end, system), ymd(start, system), european);
-    return days360(ymd(start, system), ymd(end, system), european);
+    if (start > end) return -days360(ymd(end, system), ymd(start, system), european, system);
+    return days360(ymd(start, system), ymd(end, system), european, system);
   },
 };
 
@@ -1000,7 +1011,7 @@ const YEARFRAC: FunctionSpec = {
       case 3:
         return excelSub(end, start) / 365;
       default:
-        return days360(a, b, true) / 360;
+        return days360(a, b, true, system) / 360;
     }
   },
 };

@@ -11,6 +11,8 @@ Known divergences, to be re-verified against real Excel before we rely on them:
 | Case | LibreOffice | Excel | Notes |
 | --- | --- | --- | --- |
 | `=TRUE>1` | `FALSE` | `TRUE` | Excel ranks types for comparison: number < text < FALSE < TRUE, so any boolean is greater than any number. LibreOffice coerces `TRUE` to `1` and compares numerically. We follow **Excel**. |
+| `=0^0` and `=POWER(0,0)` | `1` | `#NUM!` | Nought to the nought is a convention rather than a fact, and the two products chose differently. Excel refuses it from both the operator and the function; LibreOffice answers `1` from both. We follow **Excel**. Measured, not assumed: a probe workbook recalculated by the same pipeline the fixtures use. |
+| `=0^-1` and `=POWER(0,-1)` | `#NUM!` | `#DIV/0!` | Both refuse it; they disagree about which refusal it is. Excel calls it what it is - a division by zero - and LibreOffice reports a domain error. We follow **Excel**. |
 | `=XLOOKUP(...)`, `=XMATCH(...)` | `#NAME?` | value | LibreOffice 24.2 does not implement these. Not a divergence so much as an oracle **gap**: our engine computes the correct answers where the oracle could not. The engine test carries the documented expected values (`XLOOKUP` -> `121000`, `XMATCH` -> `8`) and verifies against those, so being ahead of the oracle is still checked rather than waved through. |
 
 Cases the oracle **did** confirm, and which we rely on:

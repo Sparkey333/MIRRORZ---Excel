@@ -55,7 +55,11 @@
  * Blanks and errors are the two things compareScalars cannot rank for a sort -
  * it treats a blank as the zero of whatever it meets, and it propagates an error
  * rather than ordering it - so this file adds the rule Excel's sort engine uses:
- * values first, then errors, then blanks, in both directions.
+ * ascending is values, then errors, then blanks; descending is the reverse of
+ * that in everything but the blanks, which are always last. Errors therefore
+ * lead a descending sort. Pinning them behind the values in both directions,
+ * which is what this file used to do, contradicted the same documented rule it
+ * was already relying on for the blanks.
  *
  * Sixth, volatility. RANDARRAY is volatile and SEQUENCE is not; nothing else
  * here is. In particular the reshaping family is pure, and ANCHORARRAY is an
@@ -401,6 +405,22 @@ function invoke(fn: Lambda, argv: (Value | undefined)[], ctx: FunctionContext): 
   }
 }
 
+/**
+ * An array-shaped argument to one of the higher-order functions.
+ *
+ * A LAMBDA value is a #CALC! CellError, so a lambda written where an array
+ * belongs would otherwise be propagated as #CALC! and the arity check below
+ * would never be reached. Excel answers #VALUE! for an argument of the wrong
+ * type, so - as everywhere else in this file - a lambda is recognised by
+ * identity before anything looks at error codes.
+ */
+function arrayArg(v: Value | undefined, ctx: FunctionContext): Grid | CellError {
+  const forced = force(v, ctx);
+  if (isLambda(forced)) return CellError.VALUE;
+  if (isError(forced)) return forced;
+  return gridOf(forced, ctx);
+}
+
 /** A lambda-valued argument, however it was written. */
 function lambdaArg(v: Value | undefined, ctx: FunctionContext): Lambda | CellError {
   const forced = force(v, ctx);
@@ -482,18 +502,28 @@ function lambdaImpl(args: Value[], _ctx: FunctionContext): Value {
 // Sorting order
 // ---------------------------------------------------------------------------
 
-/** Values sort first, then errors, then blanks - in both directions. */
-function sortClass(v: Scalar): number {
-  if (v === null) return 2;
-  if (isError(v)) return 1;
-  return 0;
-}
-
+/**
+ * Excel's default sort order, which compareScalars cannot express on its own.
+ *
+ * Ascending is numbers, then text, then FALSE, then TRUE, then errors (all
+ * equal to one another), then blanks. Descending is the exact reverse of that
+ * *except* for blanks, which are pinned to the end whichever way the sort runs.
+ * So the error class leads a descending sort rather than trailing it: it
+ * reverses along with everything else, and only the blanks stay put.
+ */
 function orderedCompare(a: Scalar, b: Scalar, descending: boolean): number {
-  const ca = sortClass(a);
-  const cb = sortClass(b);
-  if (ca !== cb) return ca - cb;
-  if (ca !== 0) return 0;
+  const blankA = a === null;
+  const blankB = b === null;
+  if (blankA || blankB) return blankA && blankB ? 0 : blankA ? 1 : -1;
+
+  const errorA = isError(a);
+  const errorB = isError(b);
+  if (errorA || errorB) {
+    if (errorA && errorB) return 0;
+    const n = errorA ? 1 : -1;
+    return descending ? -n : n;
+  }
+
   const cmp = compareScalars(a, b);
   const n = isError(cmp) ? 0 : cmp;
   return descending ? -n : n;
@@ -773,9 +803,8 @@ function randArrayImpl(args: Value[], ctx: FunctionContext): Value {
 // ---------------------------------------------------------------------------
 
 function byLineImpl(args: Value[], ctx: FunctionContext, byCol: boolean): Value {
-  const source = force(args[0], ctx);
-  if (isError(source)) return source;
-  const g = gridOf(source, ctx);
+  const g = arrayArg(args[0], ctx);
+  if (isError(g)) return g;
   const fn = lambdaArg(args[1], ctx);
   if (!isLambda(fn)) return isError(fn) ? fn : CellError.VALUE;
   if (fn.params.length !== 1) return CellError.VALUE;
@@ -798,9 +827,9 @@ function mapImpl(args: Value[], ctx: FunctionContext): Value {
 
   const grids: Grid[] = [];
   for (let i = 0; i < args.length - 1; i++) {
-    const v = force(args[i], ctx);
-    if (isError(v)) return v;
-    grids.push(gridOf(v, ctx));
+    const g = arrayArg(args[i], ctx);
+    if (isError(g)) return g;
+    grids.push(g);
   }
   if (grids.length === 0 || fn.params.length !== grids.length) return CellError.VALUE;
   const first = grids[0]!;
@@ -819,9 +848,8 @@ function mapImpl(args: Value[], ctx: FunctionContext): Value {
 function reduceImpl(args: Value[], ctx: FunctionContext, scan: boolean): Value {
   const initialThunk = args[0];
   const initial = isThunk(initialThunk) ? ctx.force(initialThunk) : (initialThunk ?? null);
-  const arrayValue = force(args[1], ctx);
-  if (isError(arrayValue)) return arrayValue;
-  const g = gridOf(arrayValue, ctx);
+  const g = arrayArg(args[1], ctx);
+  if (isError(g)) return g;
   const fn = lambdaArg(args[2], ctx);
   if (!isLambda(fn)) return isError(fn) ? fn : CellError.VALUE;
   if (fn.params.length !== 2) return CellError.VALUE;
@@ -1087,7 +1115,10 @@ function restInspected(name: string, kind: ArgKind): ParamSpec {
 export const DYNAMIC_ARRAY_FUNCTIONS: readonly FunctionSpec[] = [
   {
     name: 'FILTER',
-    params: [p.array('array'), p.array('include'), p.any('if_empty', true)],
+    // if_empty is a value FILTER hands back untouched, so an error written
+    // there must reach the implementation rather than short-circuit the call:
+    // =FILTER(a,b,NA()) has to return the matching rows when there are any.
+    params: [p.array('array'), p.array('include'), inspected('if_empty', ArgKind.Any, true)],
     impl: filterImpl,
     summary: 'Keeps the rows or columns of an array where a condition is TRUE.',
   },
@@ -1230,13 +1261,21 @@ export const DYNAMIC_ARRAY_FUNCTIONS: readonly FunctionSpec[] = [
   },
   {
     name: 'WRAPROWS',
-    params: [inspected('vector', ArgKind.Array), p.scalar('wrap_count'), p.any('pad_with', true)],
+    params: [
+      inspected('vector', ArgKind.Array),
+      p.scalar('wrap_count'),
+      inspected('pad_with', ArgKind.Any, true),
+    ],
     impl: (args, ctx) => wrapImpl(args, ctx, true),
     summary: 'Wraps a vector into rows of a given width.',
   },
   {
     name: 'WRAPCOLS',
-    params: [inspected('vector', ArgKind.Array), p.scalar('wrap_count'), p.any('pad_with', true)],
+    params: [
+      inspected('vector', ArgKind.Array),
+      p.scalar('wrap_count'),
+      inspected('pad_with', ArgKind.Any, true),
+    ],
     impl: (args, ctx) => wrapImpl(args, ctx, false),
     summary: 'Wraps a vector into columns of a given height.',
   },
@@ -1270,7 +1309,9 @@ export const DYNAMIC_ARRAY_FUNCTIONS: readonly FunctionSpec[] = [
       inspected('array', ArgKind.Array),
       p.any('rows', true),
       p.any('columns', true),
-      p.any('pad_with', true),
+      // The default pad is #N/A, so an explicit error pad has to be padded
+      // with rather than propagated.
+      inspected('pad_with', ArgKind.Any, true),
     ],
     impl: expandImpl,
     summary: 'Pads an array out to a larger size.',

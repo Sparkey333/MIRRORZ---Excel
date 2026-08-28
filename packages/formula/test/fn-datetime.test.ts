@@ -17,7 +17,7 @@
 
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { CellError, type Scalar, type Workbook, isError } from '@mirrorz/core';
+import { CellError, type Scalar, type Workbook, isError, weekdayFromSerial } from '@mirrorz/core';
 import { readXlsx } from '../../formats/src/xlsx/read.js';
 import { Evaluator, type SheetStore } from '../src/evaluator.js';
 import { DATETIME_FUNCTIONS } from '../src/functions/datetime.js';
@@ -127,7 +127,20 @@ describe('oracle: formulas.calc.xlsx', () => {
   }
 
   it('covers every function the fixture exercises', () => {
-    // Guards against a rename quietly dropping a case from the list above.
+    // The list above is only trustworthy if it is complete: any fixture case
+    // whose formula calls a function this module implements has to be asserted
+    // against LibreOffice, not just the sixteen someone remembered. Adding a
+    // date case to the fixture therefore fails here until it is listed.
+    const called = (formula: string): string[] =>
+      DATETIME_FUNCTIONS.map((f) => f.name).filter((name) =>
+        new RegExp(`\\b${name.replace('.', '\\.')}\\(`, 'i').test(
+          formula.replaceAll(/_xlfn\.(_xlws\.)?/gi, ''),
+        ),
+      );
+    const missing = [...oracle]
+      .filter(([name, c]) => called(c.formula).length > 0 && !CASES.includes(name))
+      .map(([name, c]) => `${name}: ${c.formula}`);
+    expect(missing, 'fixture date cases not asserted above').toEqual([]);
     expect(CASES.every((n) => oracle.has(n))).toBe(true);
   });
 });
@@ -570,10 +583,22 @@ describe('DAYS360', () => {
     expect(calc('DAYS360(DATE(2024,1,31),DATE(2024,2,29))')).toBe(29);
   });
 
-  it('does not treat the end of February as the end of a month', () => {
-    // The true NASD rule would give 30 here; Excel's DAYS360 gives 33, which is
-    // the difference between this function and YEARFRAC basis 0.
-    expect(calc('DAYS360(DATE(2015,2,28),DATE(2015,3,31))')).toBe(33);
+  it('folds the last day of February onto the 30th, for the start date only', () => {
+    // Microsoft documents the surprise this causes: "when you use the Days360
+    // function with a start date of February 28 and with an end date of March
+    // 28, a value of 28 days is returned", rather than the 30 a whole month
+    // would suggest. That is only reachable if the start date's end of February
+    // becomes the 30th.
+    expect(calc('DAYS360(DATE(2015,2,28),DATE(2015,3,28))')).toBe(28);
+    expect(calc('DAYS360(DATE(2015,2,28),DATE(2015,3,31))')).toBe(30);
+    // In a leap year the 28th is not the end of the month, so nothing is folded.
+    expect(calc('DAYS360(DATE(2016,2,28),DATE(2016,3,28))')).toBe(30);
+    expect(calc('DAYS360(DATE(2016,2,29),DATE(2016,3,28))')).toBe(28);
+    // The end date is never folded, which is what still separates DAYS360 from
+    // YEARFRAC's NASD basis: a whole year between two ends of February is 359
+    // days here and exactly 1.0 there.
+    expect(calc('DAYS360(DATE(2015,2,28),DATE(2016,2,29))')).toBe(359);
+    near(calc('YEARFRAC(DATE(2015,2,28),DATE(2016,2,29),0)'), 1);
   });
 
   it('applies the European method when asked', () => {
@@ -597,8 +622,10 @@ describe('YEARFRAC', () => {
     near(calc('YEARFRAC(DATE(2024,1,1),DATE(2024,7,1),0)'), 0.5);
     near(calc('YEARFRAC(DATE(2024,1,31),DATE(2024,2,29),0)'), 29 / 360);
     // Both ends the last day of February: the NASD rule folds both onto the
-    // 30th, which is exactly where DAYS360's US method differs.
+    // 30th, so a year between them is exact. DAYS360's US method folds only the
+    // start, and gives 358 days for the same interval.
     near(calc('YEARFRAC(DATE(2024,2,29),DATE(2025,2,28),0)'), 1);
+    expect(calc('DAYS360(DATE(2024,2,29),DATE(2025,2,28))')).toBe(358);
     near(calc('YEARFRAC(DATE(2015,2,28),DATE(2015,3,31),0)'), 30 / 360);
   });
 
@@ -651,6 +678,16 @@ describe('WORKDAY and WORKDAY.INTL', () => {
     // 260 working days is exactly 52 weeks from a Monday.
     expect(calc('WORKDAY(DATE(2024,1,1),260)')).toBe(calc('DATE(2024,12,30)'));
     expect(calc('WORKDAY(DATE(2024,12,30),-260)')).toBe(calc('DATE(2024,1,1)'));
+    // The result must land on a working day even when the walk starts on a
+    // weekend and the count is a whole number of working weeks: a week-at-a-time
+    // jump from Saturday the 6th would answer Saturday the 13th.
+    expect(calc('WORKDAY(DATE(2024,1,6),5)')).toBe(calc('DATE(2024,1,12)'));
+    expect(calc('WORKDAY(DATE(2024,1,7),5)')).toBe(calc('DATE(2024,1,12)'));
+    expect(calc('WORKDAY(DATE(2024,1,6),10)')).toBe(calc('DATE(2024,1,19)'));
+    expect(calc('WORKDAY(DATE(2024,1,13),-5)')).toBe(calc('DATE(2024,1,8)'));
+    expect(calc('WORKDAY(DATE(2024,1,6),-5)')).toBe(calc('DATE(2024,1,1)'));
+    // Sunday-only weekends make the working week six days long.
+    expect(calc('WORKDAY.INTL(DATE(2024,1,7),6,11)')).toBe(calc('DATE(2024,1,13)'));
   });
 
   it('skips holidays', () => {
@@ -696,6 +733,79 @@ describe('WORKDAY and WORKDAY.INTL', () => {
     expect(code(calc('WORKDAY("x",1)'))).toBe('#VALUE!');
     expect(code(calc('WORKDAY(DATE(2024,1,1),NA())'))).toBe('#N/A');
     expect(code(calc('WORKDAY(DATE(2024,1,1),1,{45296;"x"})'))).toBe('#VALUE!');
+  });
+});
+
+/**
+ * The two working-day walkers are optimised - they count and jump whole weeks -
+ * so they are also cross-checked against the obvious day-at-a-time loop over a
+ * fixed pseudo-random sample. That is what catches an off-by-one in the jump
+ * (a five-working-day step from a Saturday landing on the next Saturday), which
+ * no hand-written example is likely to cover for all fourteen weekend codes.
+ */
+describe('the working-day walkers against a day-at-a-time reference', () => {
+  const MASKS: Record<number, string> = {
+    1: '0000011', 2: '1000001', 3: '1100000', 4: '0110000', 5: '0011000', 6: '0001100',
+    7: '0000110', 11: '0000001', 12: '1000000', 13: '0100000', 14: '0010000',
+    15: '0001000', 16: '0000100', 17: '0000010',
+  };
+  const CODES = Object.keys(MASKS).map(Number);
+  const isWeekend = (serial: number, mask: string): boolean =>
+    mask[(weekdayFromSerial(serial, 1900) + 6) % 7] === '1';
+
+  /** A fixed sequence, so a failure is reproducible. */
+  function sampler(seed: number): (n: number) => number {
+    let state = seed;
+    return (n) => {
+      state = (state * 1103515245 + 12345) % 2147483648;
+      return state % n;
+    };
+  }
+
+  it('NETWORKDAYS.INTL counts what a loop over the days counts', () => {
+    const rnd = sampler(7);
+    for (let i = 0; i < 200; i++) {
+      const start = 45000 + rnd(400);
+      const end = start - 60 + rnd(200);
+      const code = CODES[rnd(CODES.length)]!;
+      const holidays: number[] = [];
+      for (let h = rnd(4); h > 0; h--) holidays.push(Math.min(start, end) - 5 + rnd(80));
+      const arg = holidays.length > 0 ? `,{${holidays.join(';')}}` : '';
+      const formula = `NETWORKDAYS.INTL(${start},${end},${code}${arg})`;
+
+      const mask = MASKS[code]!;
+      const unique = new Set(holidays);
+      let count = 0;
+      for (let d = Math.min(start, end); d <= Math.max(start, end); d++) {
+        if (!isWeekend(d, mask) && !unique.has(d)) count++;
+      }
+      expect(calc(formula), formula).toBe(start > end ? -count : count);
+    }
+  });
+
+  it('WORKDAY.INTL lands where a loop over the days lands', () => {
+    const rnd = sampler(11);
+    for (let i = 0; i < 200; i++) {
+      const start = 45000 + rnd(400);
+      const days = -40 + rnd(81);
+      const code = CODES[rnd(CODES.length)]!;
+      const holidays: number[] = [];
+      for (let h = rnd(4); h > 0; h--) holidays.push(start - 60 + rnd(120));
+      const arg = holidays.length > 0 ? `,{${holidays.join(';')}}` : '';
+      const formula = `WORKDAY.INTL(${start},${days},${code}${arg})`;
+
+      const mask = MASKS[code]!;
+      const unique = new Set(holidays);
+      let cur = start;
+      if (days !== 0) {
+        const step = days > 0 ? 1 : -1;
+        for (let left = Math.abs(days); left > 0; ) {
+          cur += step;
+          if (!isWeekend(cur, mask) && !unique.has(cur)) left--;
+        }
+      }
+      expect(calc(formula), formula).toBe(cur);
+    }
   });
 });
 

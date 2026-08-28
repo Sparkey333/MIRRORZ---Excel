@@ -154,16 +154,18 @@ describe('oracle: formulas.calc.xlsx', () => {
 /**
  * Sheet S:
  *
- *        A       B     C       D    E       F         G
- *   1    3       b     1       10   TRUE    #DIV/0!   5
- *   2    1       a     text    20   FALSE             (blank)
- *   3    2       B     FALSE   30   TRUE    (blank)   7
- *   4    1       c     TRUE    40   FALSE
+ *        A       B     C       D    E       F         G         H
+ *   1    3       b     1       10   TRUE    #DIV/0!   5         5
+ *   2    1       a     text    20   FALSE             (blank)   #DIV/0!
+ *   3    2       B     FALSE   30   TRUE    (blank)   7         1
+ *   4    1       c     TRUE    40   FALSE                       (blank)
  *   5  (blank)   a             50   TRUE
  *
  * A has duplicates and a trailing blank, B differs only by case, C holds one of
  * each type in Excel's ranking order, E is a boolean mask, F is an error beside
- * a blank, and G is a column with a hole in it.
+ * a blank, G is a column with a hole in it, and H is the one column that holds
+ * values, an error and a blank at once - the only shape that can tell the two
+ * candidate rules for a descending sort apart.
  */
 function makeBook(): Workbook {
   const wb = new Workbook();
@@ -179,6 +181,9 @@ function makeBook(): Workbook {
   s.setValue(0, 5, CellError.DIV0);
   s.setValue(0, 6, 5);
   s.setValue(2, 6, 7);
+  s.setValue(0, 7, 5);
+  s.setValue(1, 7, CellError.DIV0);
+  s.setValue(2, 7, 1);
   return wb;
 }
 
@@ -273,6 +278,14 @@ describe('FILTER', () => {
   it('propagates an error inside the mask', () => {
     expect(code(run('FILTER(D1:D5,F1:F5)'))).toBe('#DIV/0!');
   });
+
+  it('hands if_empty back untouched instead of propagating it', () => {
+    // if_empty is a value FILTER returns, not one it computes with, so an error
+    // written there must not short-circuit a call that found matching rows.
+    // =FILTER(a,b,NA()) is the idiom this protects.
+    expect(rows('FILTER(D1:D5,E1:E5,1/0)')).toEqual([[10], [30], [50]]);
+    expect(code(run('FILTER(D1:D5,D1:D5>100,1/0)'))).toBe('#DIV/0!');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -324,8 +337,17 @@ describe('SORT', () => {
     expect(rows('SORT(A1:D1,,,TRUE)')).toEqual([[1, 3, 10, 'b']]);
   });
 
-  it('orders errors after values and before blanks', () => {
+  it('orders errors after values ascending and before them descending', () => {
+    // Microsoft's default sort orders: ascending is numbers, text, FALSE, TRUE,
+    // errors, blanks; descending is the reverse of that in everything but the
+    // blanks, which are always last. So the error class leads a descending
+    // sort. Ordering errors behind the values in *both* directions - which this
+    // module used to do - contradicted the same rule it invoked for the blanks.
     expect(rows('SORT(F1:F3)')).toEqual([[CellError.DIV0], [null], [null]]);
+    expect(rows('SORT(H1:H4)')).toEqual([[1], [5], [CellError.DIV0], [null]]);
+    expect(rows('SORT(H1:H4,,-1)')).toEqual([[CellError.DIV0], [5], [1], [null]]);
+    // SORTBY orders by the same rule.
+    expect(rows('SORTBY(D1:D4,H1:H4,-1)')).toEqual([[20], [10], [30], [40]]);
   });
 
   it('rejects an out-of-range index and an order that is not 1 or -1', () => {
@@ -662,6 +684,25 @@ describe('REDUCE and SCAN', () => {
   });
 });
 
+describe('a lambda where an array belongs', () => {
+  it('is #VALUE!, not the lambda\u2019s own #CALC!', () => {
+    // A LAMBDA value is a #CALC! CellError, so propagating it as an error would
+    // report #CALC! for what is a wrong-argument-type mistake. The higher-order
+    // functions recognise a lambda by identity first, everywhere.
+    expect(code(run('MAP(D1:D3,LAMBDA(v,v),LAMBDA(v,v))'))).toBe('#VALUE!');
+    expect(code(run('BYROW(LAMBDA(q,q),LAMBDA(r,r))'))).toBe('#VALUE!');
+    expect(code(run('BYCOL(LAMBDA(q,q),LAMBDA(c,c))'))).toBe('#VALUE!');
+    expect(code(run('REDUCE(0,LAMBDA(q,q),LAMBDA(a,v,a))'))).toBe('#VALUE!');
+    expect(code(run('SCAN(0,LAMBDA(q,q),LAMBDA(a,v,a))'))).toBe('#VALUE!');
+  });
+
+  it('still lets a real error through from the array argument', () => {
+    expect(code(run('MAP(1/0,LAMBDA(v,v))'))).toBe('#DIV/0!');
+    expect(code(run('BYROW(1/0,LAMBDA(r,r))'))).toBe('#DIV/0!');
+    expect(code(run('REDUCE(0,1/0,LAMBDA(a,v,a))'))).toBe('#DIV/0!');
+  });
+});
+
 describe('MAKEARRAY', () => {
   it('builds from one-based row and column indices', () => {
     expect(rows('MAKEARRAY(2,3,LAMBDA(r,c,r*10+c))')).toEqual([
@@ -770,6 +811,19 @@ describe('WRAPROWS and WRAPCOLS', () => {
     ]);
   });
 
+  it('pads with an error when that is what it was given', () => {
+    // The default pad is already #N/A, so an explicit error pad has to be
+    // padded with rather than propagated.
+    expect(rows('WRAPROWS(SEQUENCE(1,3),2,1/0)')).toEqual([
+      [1, 2],
+      [3, CellError.DIV0],
+    ]);
+    expect(rows('WRAPCOLS(SEQUENCE(1,3),2,1/0)')).toEqual([
+      [1, 3],
+      [2, CellError.DIV0],
+    ]);
+  });
+
   it('rejects a two-dimensional input and a wrap count below one', () => {
     expect(code(run('WRAPROWS({1,2;3,4},2)'))).toBe('#VALUE!');
     expect(code(run('WRAPROWS(SEQUENCE(1,3),0)'))).toBe('#NUM!');
@@ -844,6 +898,13 @@ describe('EXPAND', () => {
 
   it('leaves a dimension alone when it is omitted', () => {
     expect(rows('EXPAND({1,2},,3,"-")')).toEqual([[1, 2, '-']]);
+  });
+
+  it('pads with an error when that is what it was given', () => {
+    expect(rows('EXPAND({1},2,2,1/0)')).toEqual([
+      [1, CellError.DIV0],
+      [CellError.DIV0, CellError.DIV0],
+    ]);
   });
 
   it('refuses to shrink', () => {

@@ -32,7 +32,7 @@ import { readXlsx } from '../../formats/src/xlsx/read.js';
 import { Evaluator } from '../src/evaluator.js';
 import { ENGINEERING_FUNCTIONS } from '../src/functions/engineering.js';
 import { parseFormula } from '../src/parser.js';
-import { FunctionRegistry } from '../src/registry.js';
+import { FunctionRegistry, storageName } from '../src/registry.js';
 import { WorkbookStore } from '../src/store.js';
 import { toExcelPrecision } from '../src/value.js';
 
@@ -48,12 +48,19 @@ const { workbook: oracleBook } = readXlsx(
 );
 const oracleSheet = oracleBook.getSheet('Formulas')!;
 const ORACLE = new Map<string, Scalar>();
-const ORACLE_FORMULAS: string[] = [];
 for (const { row, col, cell } of oracleSheet.entries()) {
   if (col !== 2 || !cell.formula) continue;
-  ORACLE_FORMULAS.push(cell.formula);
   const name = oracleSheet.getValue(row, 0);
   if (typeof name === 'string') ORACLE.set(name, cell.value);
+}
+
+/** Every formula in both oracle workbooks, on every sheet and in every cell. */
+const ORACLE_FORMULAS: string[] = [];
+for (const file of ['formulas.calc.xlsx', 'precedence.calc.xlsx']) {
+  const { workbook } = readXlsx(new Uint8Array(readFileSync(new URL(file, FIXTURES))));
+  for (const sheet of workbook.sheets) {
+    for (const { cell } of sheet.entries()) if (cell.formula) ORACLE_FORMULAS.push(cell.formula);
+  }
 }
 
 function oracleNumber(name: string): number {
@@ -63,7 +70,7 @@ function oracleNumber(name: string): number {
 }
 
 describe('the oracle', () => {
-  it('has no case for any function in this category', () => {
+  it('has no case for any function in this category, on any sheet of either file', () => {
     const names = new Set(ENGINEERING_FUNCTIONS.map((f) => f.name));
     const used = ORACLE_FORMULAS.flatMap((f) => [...f.matchAll(/([A-Z][A-Z0-9._]*)\s*\(/gi)])
       .map((m) => m[1]!.toUpperCase())
@@ -356,6 +363,11 @@ describe('base conversion', () => {
       ['DEC2BIN(-1,2)', '1111111111'],
       ['DEC2HEX(-54,6)', 'FFFFFFFFCA'],
       ['OCT2HEX(7777777533,6)', 'FFFFFFFF5B'],
+      // Ignored, but only after it has been read: a places that is not a number
+      // is #VALUE! whatever the sign of the result, because the conversion
+      // happens before the rule that discards it.
+      ['DEC2BIN(-1,"x")', CellError.VALUE],
+      ['DEC2HEX(-54,"x")', CellError.VALUE],
     ]);
   });
 
@@ -732,6 +744,64 @@ describe('BESSEL', () => {
     ]);
   });
 
+  it('stays inside the amplitude that bounds J and Y for a large argument', () => {
+    // |J_n(x)| and |Y_n(x)| can never exceed sqrt(2/(pi x)) by more than the
+    // first correction term. A quadrature that has run out of nodes does not
+    // merely lose digits, it returns a number no Bessel function can take, and
+    // that is what this catches.
+    for (const [x, n] of [
+      [3000, 0], [20000, 0], [100000, 0], [1e6, 1], [1e7, 0], [1e9, 0],
+    ] as const) {
+      const bound = Math.sqrt(2 / (Math.PI * x)) * 1.01;
+      expect(Math.abs(num(`BESSELJ(${x},${n})`)), `J(${x},${n})`).toBeLessThan(bound);
+      expect(Math.abs(num(`BESSELY(${x},${n})`)), `Y(${x},${n})`).toBeLessThan(bound);
+    }
+  });
+
+  it('satisfies J^2 + Y^2 = 2/(pi x) far out, where only the phase is left', () => {
+    // The identity holds to O(1/x^2) - exactly (4n^2-1)/(8x^2) - so it pins
+    // both functions absolutely, without a table and without the recurrences.
+    for (const [x, n] of [
+      [3000, 0], [20000, 0], [100000, 0], [1e6, 1], [1e7, 0], [1e9, 0], [1e12, 0],
+    ] as const) {
+      const j = num(`BESSELJ(${x},${n})`);
+      const y = num(`BESSELY(${x},${n})`);
+      const expected = 2 / (Math.PI * x);
+      const correction = Math.abs(4 * n * n - 1) / (8 * x * x) + 1e-12;
+      expect(Math.abs((j * j + y * y) / expected - 1), `x=${x} n=${n}`).toBeLessThan(correction);
+    }
+  });
+
+  it('holds the recurrence and the Wronskian out where the argument is large', () => {
+    for (const [x, n] of [[3000, 1], [100000, 2], [1e6, 1]] as const) {
+      const scale = (2 * n) / x;
+      const amplitude = Math.sqrt(2 / (Math.PI * x));
+      const recurrence =
+        num(`BESSELJ(${x},${n - 1})`) + num(`BESSELJ(${x},${n + 1})`) -
+        scale * num(`BESSELJ(${x},${n})`);
+      expect(Math.abs(recurrence) / amplitude, `J recurrence at ${x}`).toBeLessThan(1e-10);
+      const wronskian =
+        num(`BESSELJ(${x},${n + 1})`) * num(`BESSELY(${x},${n})`) -
+        num(`BESSELJ(${x},${n})`) * num(`BESSELY(${x},${n + 1})`);
+      expect(Math.abs(wronskian / (2 / (Math.PI * x)) - 1), `Wronskian at ${x}`).toBeLessThan(1e-12);
+    }
+  });
+
+  it('costs a bounded amount of work however large the argument is', () => {
+    // The quadratures need work proportional to x; without a ceiling on it
+    // BESSELY(1E9,0) alone runs for the better part of an hour.
+    const started = Date.now();
+    for (const formula of ['BESSELY(1E9,0)', 'BESSELJ(1E9,0)', 'BESSELY(1E12,3)', 'BESSELK(1E9,0)']) {
+      expect(typeof run(formula), formula).toBe('number');
+    }
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('reflects a large negative argument rather than integrating one', () => {
+    near('BESSELJ(-100000,0)', num('BESSELJ(100000,0)'));
+    near('BESSELJ(-100000,1)', -num('BESSELJ(100000,1)'));
+  });
+
   it('reports an overflow as #NUM! rather than as infinity', () => {
     // I0 grows like e^x/sqrt(2 pi x), so it is finite at 700 and not at 800.
     expect(num('BESSELI(700,0)')).toBeGreaterThan(1e302);
@@ -1056,6 +1126,13 @@ describe('metadata', () => {
     for (const name of ['DEC2BIN', 'COMPLEX', 'CONVERT', 'ERF', 'BESSELJ', 'DSUM']) {
       expect(registry.get(name)?.futureFunction, name).toBe(false);
     }
+    // The flag on the spec is not enough on its own: the xlsx writer prefixes
+    // from the name list, so a 2013 function missing from it round-trips into a
+    // file Excel shows as #NAME?.
+    for (const name of ['IMCOT', 'IMSEC', 'BITAND', 'ERF.PRECISE']) {
+      expect(storageName(name), name).toBe(`_xlfn.${name}`);
+    }
+    expect(storageName('BESSELJ')).toBe('BESSELJ');
   });
 
   it('broadcasts the scalar functions and not the aggregating ones', () => {

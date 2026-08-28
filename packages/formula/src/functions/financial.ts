@@ -214,6 +214,11 @@ function newton(
     if (!Number.isFinite(slope) || Math.abs(slope) < FLAT_SLOPE) return undefined;
     const next = x - y / slope;
     if (!Number.isFinite(next)) return undefined;
+    // A step that overshoots the whole domain is abandoned rather than damped
+    // back into it. Excel's own IRR page says as much: its two-year example
+    // "needs" a guess of -10 per cent, because from the default 10 per cent
+    // the first Newton step leaves the domain and never returns. Making the
+    // solver more robust than that would answer where Excel reports #NUM!.
     if (Math.abs(next - x) <= SOLVER_TOLERANCE * Math.max(1, Math.abs(next))) return next;
     x = next;
   }
@@ -631,7 +636,11 @@ function bondPrice(
   const accrued = coupon * (g.sinceCoupon / g.periodDays);
 
   if (g.count <= 1) {
-    const remaining = (g.periodDays - g.sinceCoupon) / g.periodDays;
+    // DSR/E, where DSR is the days from settlement to the redemption date and
+    // E the days in the coupon period. DSR is *not* E - A: on bases 2 and 3
+    // Excel counts DSR and A in actual days while E is the convention's 360 or
+    // 365 over the frequency, so the two halves do not tile the period.
+    const remaining = g.toCoupon / g.periodDays;
     return (coupon + redemption) / (1 + (yld / frequency) * remaining) - accrued;
   }
 
@@ -1222,7 +1231,10 @@ function irregularSeries(
   if (isError(values)) return values;
   const rawDates = positional(datesArg);
   if (isError(rawDates)) return rawDates;
-  if (values.length !== rawDates.length || values.length < 2) return CellError.NUM;
+  // Microsoft documents exactly one shape error here - values and dates of
+  // different lengths - so a single pair is a schedule of one flow, not an
+  // error. XIRR's own sign requirement is what rejects it there.
+  if (values.length !== rawDates.length || values.length === 0) return CellError.NUM;
 
   const dates = rawDates.map((d) => Math.floor(d));
   const first = dates[0]!;
@@ -1501,11 +1513,15 @@ const VDB: FunctionSpec = {
  * to whole currency units is part of the definition: dropping it produces
  * numbers that are close but never equal to the ones the tax authority expects.
  */
-function amorCoefficient(usefulLife: number): number {
-  if (usefulLife < 3) return 1;
-  if (usefulLife < 5) return 1.5;
-  if (usefulLife <= 6) return 2;
-  return 2.5;
+function amorCoefficient(usefulLife: number): number | CellError {
+  // The statutory table only defines a coefficient for a life of three to four
+  // years, five to six, and more than six. Microsoft documents every gap in it
+  // - a life between 0 and 1, 1 and 2, 2 and 3, or 4 and 5 - as #NUM!, so the
+  // gaps must not be filled in with a neighbouring coefficient.
+  if (usefulLife >= 3 && usefulLife <= 4) return 1.5;
+  if (usefulLife >= 5 && usefulLife <= 6) return 2;
+  if (usefulLife > 6) return 2.5;
+  return CellError.NUM;
 }
 
 /** Round half away from zero, which is what Excel's own rounding does. */
@@ -1574,7 +1590,9 @@ const AMORDEGRC: FunctionSpec = {
     if (isError(a)) return a;
     if (a.period > MAX_DEPRECIATION_PERIODS) return CellError.NUM;
 
-    const rate = a.rate * amorCoefficient(1 / a.rate);
+    const coefficient = amorCoefficient(1 / a.rate);
+    if (isError(coefficient)) return coefficient;
+    const rate = a.rate * coefficient;
     let book = a.cost;
     let amount = roundAway(
       yearFraction(a.purchased, a.firstPeriod, a.basis) * rate * a.cost,
@@ -1932,7 +1950,9 @@ const YIELD: FunctionSpec = {
     if (g.count <= 1) {
       // In the last coupon period the yield is a money-market rate and inverts
       // in closed form; iterating here would be slower and no more accurate.
-      const remaining = g.periodDays - g.sinceCoupon;
+      // DSR, the days from settlement to redemption, which on bases 2 and 3 is
+      // counted in actual days and so differs from E - A.
+      const remaining = g.toCoupon;
       if (remaining === 0) return CellError.NUM;
       const carried = price / 100 + (g.sinceCoupon / g.periodDays) * (rate / b.frequency);
       if (carried === 0) return CellError.NUM;
