@@ -20,7 +20,6 @@ const external = [
 ];
 
 export default defineConfig({
-  resolve: { conditions: ['development'] },
   build: {
     outDir: 'dist/main',
     emptyOutDir: true,

@@ -128,6 +128,52 @@ describe('payload codec rejects what it cannot trust', () => {
   });
 });
 
+describe('dates a Date object cannot hold', () => {
+  // Regression: a day count large enough to put `new Date(...)` outside its
+  // representable range decoded happily, and then threw inside the assessment's
+  // explanation - a throw in the one module that promises never to throw.
+  it('refuses to encode a date past the year 9999', () => {
+    expect(() => encodePayload({ ...BASE, maintenanceExpires: 8.64e15 })).toThrow();
+  });
+
+  it('refuses to encode a date before the epoch', () => {
+    expect(() => encodePayload({ ...BASE, issued: Date.UTC(1969, 0, 1) })).toThrow();
+  });
+
+  it('refuses to decode an absurd day count', () => {
+    // With all three dates at day 0 they occupy one byte each, at offsets 4, 5
+    // and 6, so the maintenance varint can be swapped for an oversized one
+    // without knowing anything else about the layout.
+    const flat = encodePayload({ ...BASE, issued: 0, expires: null, maintenanceExpires: null });
+    expect(decodePayload(flat).ok).toBe(true);
+    const spliced = Uint8Array.from([
+      ...flat.subarray(0, 6),
+      ...leb(9_000_000), // maintenance, past the ceiling
+      ...flat.subarray(7),
+    ]);
+    const result = decodePayload(spliced);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('range');
+  });
+
+  it('still round trips a licence dated in the far but sane future', () => {
+    const payload = { ...BASE, maintenanceExpires: Date.UTC(2200, 0, 1) };
+    expect(roundTrip(payload).maintenanceExpires).toBe(Date.UTC(2200, 0, 1));
+  });
+});
+
+/** LEB128, matching the encoder, so the splice above is a real payload byte. */
+function leb(value: number): number[] {
+  const out: number[] = [];
+  let rest = value;
+  while (rest >= 0x80) {
+    out.push((rest & 0x7f) | 0x80);
+    rest = Math.floor(rest / 128);
+  }
+  out.push(rest);
+  return out;
+}
+
 describe('day conversion', () => {
   it('round trips through days', () => {
     expect(fromDays(toDays(Date.UTC(2026, 5, 1)))).toBe(Date.UTC(2026, 5, 1));

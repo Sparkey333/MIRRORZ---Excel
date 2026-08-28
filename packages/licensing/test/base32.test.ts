@@ -177,4 +177,17 @@ describe('formatGroups', () => {
   it('keeps a short remainder as its own block', () => {
     expect(formatGroups('ABCDEFG', { group: 5, perLine: 0 })).toBe('ABCDE-FG');
   });
+
+  // Regression: a group size of zero made the loop never advance, so the call
+  // hung instead of failing. A hang inside licence formatting is a wedged app.
+  it.each([0, -3, Number.NaN, Number.POSITIVE_INFINITY])('terminates with a group size of %p', (group) => {
+    const formatted = formatGroups('ABCDEFGHIJ', { group, perLine: 0 });
+    expect(formatted.replace(/-/g, '')).toBe('ABCDEFGHIJ');
+  });
+
+  it('terminates with a non-finite line length', () => {
+    expect(formatGroups('ABCDEFGHIJ', { group: 5, perLine: Number.NaN }).replace(/[-\n]/g, '')).toBe(
+      'ABCDEFGHIJ',
+    );
+  });
 });

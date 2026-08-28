@@ -589,6 +589,29 @@ describe('TEXT', () => {
     expect(calc('TEXT(1,"0.0e+00")')).toBe('1.0e+00');
   });
 
+  it('writes fraction formats', () => {
+    // The examples from Microsoft's own TEXT article.
+    expect(calc('TEXT(4.34,"# ?/?")')).toBe('4 1/3');
+    expect(calc('TEXT(0.34,"# ?/?")')).toBe(' 1/3');
+    expect(calc('TEXT(12200000,"#,###.0,")')).toBe('12,200.0');
+    expect(calc('TEXT(12200000,"0.00E+00")')).toBe('1.22E+07');
+    // The denominator is a best rational approximation, not a rounded one: 0.7
+    // is 5/7 with one digit to spend, never 6/9.
+    expect(calc('TEXT(0.7,"?/?")')).toBe('5/7');
+    expect(calc('TEXT(4.34,"?/?")')).toBe('13/3');
+    // A fixed denominator, and the padding that keeps a column aligned.
+    expect(calc('TEXT(4.34,"# ?/16")')).toBe('4 5/16');
+    expect(calc('TEXT(5.25,"# ???/???")')).toBe('5   1/4  ');
+    expect(calc('TEXT(5.3,"# ???/???")')).toBe('5   3/10 ');
+    // A whole number blanks the fraction rather than printing 0/1, and a
+    // remainder that rounds up carries into the integer.
+    expect(calc('TEXT(2,"# ?/?")')).toBe('2    ');
+    expect(calc('TEXT(1.9999,"# ?/?")')).toBe('2    ');
+    expect(calc('TEXT(-4.34,"# ?/?")')).toBe('-4 1/3');
+    // A date format's slashes are not a fraction.
+    expect(calc('TEXT(45351,"m/d/yyyy")')).toBe('2/29/2024');
+  });
+
   it('takes the case of AM/PM from the format code', () => {
     expect(calc('TEXT(0.75,"h AM/PM")')).toBe('6 PM');
     expect(calc('TEXT(0.75,"h am/pm")')).toBe('6 pm');

@@ -10,7 +10,6 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  resolve: { conditions: ['development'] },
   build: {
     outDir: 'dist/preload',
     emptyOutDir: true,

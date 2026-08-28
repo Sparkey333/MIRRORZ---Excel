@@ -28,6 +28,14 @@ law requires it (see *Taking the money*).
 | Update renewal after the first 12 months | - | $39 / yr | $79 / yr | - |
 | Devices per licence | unlimited | 2 | 3 | 2 / seat |
 
+Device counts and seat counts in that table are **licence terms, not locks**. A
+device count cannot be enforced without a server that counts activations, and
+this product does not have one and will not get one; the seat number is carried
+in the licence payload and is displayed, but nothing in the software refuses a
+fourth machine. They are stated so a buyer knows what they are buying, and
+honoured the way a book's licence is honoured - by the reader. `use.commercial`
+in `entitlements.ts` is the same kind of term and says so in the code.
+
 ### Free - $0, forever, no account, no e-mail address
 
 Everything to do with your own files:
@@ -179,7 +187,10 @@ in the binary reports back.
 - **No paid-tier-only file format.** Everything we can write, every tier can
   write.
 - **No expiry on a perpetual licence.** If we ever ship a build that stops a paid
-  perpetual licence from running, that is a bug of the highest severity.
+  perpetual licence from running, that is a bug of the highest severity. The
+  assessment's default for an unknown build date is therefore *covered*, not
+  *now*: a caller that forgets to bake a release date in gets a licence that
+  keeps working, never one that quietly expires on its maintenance anniversary.
 
 ## Sources and verification status
 

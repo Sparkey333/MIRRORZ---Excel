@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
-    "build": "npm run build:renderer && npm run build:shell",
+    "build": "npm run build:packages && npm run build:renderer && npm run build:shell",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.main.config.ts",
     "dev:electron": "npm run build:shell && electron .",
@@ -19,7 +19,8 @@
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux"
+    "dist:linux": "npm run build && electron-builder --linux",
+    "build:packages": "tsc --build ../../tsconfig.json"
   },
   "dependencies": {
     "@mirrorz/core": "0.1.0",
@@ -41,5 +42,6 @@
   },
   "description": "MIRRORZ Sheets desktop shell (Electron main process, preload bridge and renderer)",
   "main": "dist/main/index.cjs",
-  "author": "MIRRORZ Sheets contributors"
+  "author": "MIRRORZ Sheets contributors",
+  "homepage": "https://github.com/Sparkey333/MIRRORZ---Excel"
 }

@@ -1,10 +1,13 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ALPHABET } from '../src/base32.js';
 import type { LicensePayload } from '../src/codec.js';
 import {
+  derivePublicKey,
   generateKeyPair,
   makePayload,
   signLicense,
+  toPrivateKey,
   toPublicKey,
   verifyLicense,
 } from '../src/license.js';
@@ -149,6 +152,53 @@ describe('tampering', () => {
     const flatB = other.replace(/[-\n]/g, '');
     const spliced = flatB.slice(0, 20) + flatA.slice(20);
     expect(verifyLicense(spliced, KEYS.publicKey).valid).toBe(false);
+  });
+});
+
+describe('a build defect is never reported as a forgery', () => {
+  // Regression: any object that was not a Uint8Array used to be passed straight
+  // through as if it were a KeyObject. `verify` then threw, the throw was
+  // swallowed as "signature", and a paying customer was told their key "was not
+  // issued by us" because OUR build shipped a broken key.
+  it('rejects a key of the wrong algorithm as a build problem', () => {
+    const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const result = verifyLicense(KEY_TEXT, rsa.publicKey);
+    expect(result.reason).toBe('public-key');
+    expect(result.message).toContain('free tier');
+  });
+
+  it('rejects a private key handed in where the public one belongs', () => {
+    const result = verifyLicense(KEY_TEXT, toPrivateKey(KEYS.privateKey));
+    expect(result.reason).toBe('public-key');
+  });
+
+  it.each([null, undefined, 42, {}, [], true])('reports %p as a build problem, not a forgery', (key) => {
+    const result = verifyLicense(KEY_TEXT, key as never);
+    expect(result.reason).toBe('public-key');
+    expect(result.valid).toBe(false);
+  });
+
+  it('still calls a genuine forgery a forgery', () => {
+    expect(verifyLicense(signLicense(PAYLOAD, OTHER.privateKey), KEYS.publicKey).reason).toBe('signature');
+  });
+});
+
+describe('deriving the public half', () => {
+  it('recovers the public key from the private key', () => {
+    expect(derivePublicKey(KEYS.privateKey)).toBe(KEYS.publicKey);
+  });
+
+  it('recovers it from the PEM form too', () => {
+    expect(derivePublicKey(KEYS.privateKeyPem)).toBe(KEYS.publicKey);
+  });
+
+  it('verifies a freshly minted licence against the derived key', () => {
+    // This is the check the minting tool runs on every licence it issues.
+    expect(verifyLicense(KEY_TEXT, derivePublicKey(KEYS.privateKey)).valid).toBe(true);
+  });
+
+  it('does not silently derive from the wrong pair', () => {
+    expect(verifyLicense(KEY_TEXT, derivePublicKey(OTHER.privateKey)).reason).toBe('signature');
   });
 });
 

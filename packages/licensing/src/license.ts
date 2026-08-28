@@ -316,6 +316,19 @@ export interface LicenseAssessment {
   readonly buildCovered: boolean;
   readonly graceEndsAt: number | null;
   readonly graceDaysRemaining: number;
+  /**
+   * True when the verdict was computed from the monotonic high-water mark rather
+   * than from the wall clock - that is, the machine's clock is behind a time this
+   * installation has already seen.
+   *
+   * This matters because the mark is sticky and the failure it causes is silent:
+   * a machine whose clock read 2099 for one launch records 2099 forever, and from
+   * then on a perfectly good subscription reads as lapsed with nothing on screen
+   * to say why or what to do about it. Surfacing the flag lets the status line
+   * name the real cause - the clock - instead of implying the customer did not
+   * pay.
+   */
+  readonly clockFloorApplied: boolean;
   /** One sentence for the status line. Plain, never a threat. */
   readonly explanation: string;
 }
@@ -338,9 +351,18 @@ function freeAssessment(state: LicenseState, reason: VerifyReason, explanation: 
     buildCovered: true,
     graceEndsAt: null,
     graceDaysRemaining: 0,
+    clockFloorApplied: false,
     explanation,
   };
 }
+
+/**
+ * Appended when a clock disagreement, not a missed payment, is what ended a
+ * subscription. Without it the only remedy - fix the clock, or delete the trial
+ * record that holds the stale mark - is undiscoverable.
+ */
+const CLOCK_NOTE =
+  " This machine's clock is behind a date this installation has already seen, which is what ended the term here; if the clock is wrong, correcting it and restarting is the fix.";
 
 /**
  * Turn a licence key into what the user may do right now. This is where the
@@ -386,12 +408,15 @@ export function assessLicense(
   const buildDate = Number.isFinite(context.buildDate) ? (context.buildDate as number) : 0;
   const buildMajor = Number.isFinite(context.buildMajor) ? (context.buildMajor as number) : 0;
 
+  const clockFloorApplied = floor !== undefined && floor > wall;
+
   const base = {
     kind: payload.kind,
     seats: payload.seats,
     features: payload.features,
     payload,
     reason: 'ok' as const,
+    clockFloorApplied,
   };
 
   if (payload.kind === 'perpetual') {
@@ -492,7 +517,8 @@ export function assessLicense(
     graceEndsAt,
     graceDaysRemaining: 0,
     explanation:
-      'Your subscription ended and the offline grace period is over, so this is now the free tier. Every file you have stays open, editable and saveable.',
+      'Your subscription ended and the offline grace period is over, so this is now the free tier. Every file you have stays open, editable and saveable.' +
+      (clockFloorApplied ? CLOCK_NOTE : ''),
   };
 }
 

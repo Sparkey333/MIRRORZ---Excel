@@ -27,8 +27,10 @@
  * dependency arrow the wrong way: the formula package must not know about file
  * formats. `setTextFormatter` below is the seam for the application layer to
  * inject the full engine; until it does, the local subset covers the digit
- * placeholders, decimals, thousands separators, percent, section splitting and
- * the common date and time tokens.
+ * placeholders, decimals, thousands separators and scaling commas, percent,
+ * scientific and fraction forms, section splitting and the common date and time
+ * tokens. Conditions, colours, elapsed time ([h]), fractional seconds and
+ * locale identifiers are the full engine's job.
  *
  * The REGEX* functions are specified against RE2, which has no backreferences
  * and no lookbehind. They are implemented over JavaScript's RegExp, which has
@@ -778,7 +780,7 @@ const FIXED: FunctionSpec = {
  * Injection seam for the complete number-format engine.
  *
  * packages/formats/src/numfmt.ts implements the whole grammar - conditions,
- * colours, fractions, elapsed time, locale identifiers. The formula package
+ * colours, elapsed time, locale identifiers. The formula package
  * cannot import it without inverting the dependency, so the application wires it
  * in at startup instead. Everything below is the fallback used until it does.
  */
@@ -943,9 +945,177 @@ function formatScientific(
   return `${body}${e}${sign}${digits}`;
 }
 
+/**
+ * Fraction formats: "# ?/?" and friends. The numerator is the last unbroken run
+ * of placeholders before the slash, anything further left is the whole part, and
+ * the denominator is either placeholders or a literal number as in "# ?/16".
+ */
+function fractionSplit(
+  tokens: NumToken[],
+): { slash: number; numStart: number; numLen: number; denLen: number; fixedDen?: number } | undefined {
+  const slash = tokens.findIndex((t) => t.t === 'lit' && t.s === '/');
+  if (slash < 0) return undefined;
+
+  let numStart = slash;
+  while (numStart > 0 && tokens[numStart - 1]!.t === 'ph') numStart--;
+  const numLen = slash - numStart;
+  if (numLen === 0) return undefined;
+
+  let denLen = 0;
+  while (tokens[slash + 1 + denLen]?.t === 'ph') denLen++;
+  if (denLen > 0) return { slash, numStart, numLen, denLen };
+
+  // A literal denominator such as "# ?/16" arrives as one lit token per digit.
+  let literal = '';
+  for (let i = slash + 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.t !== 'lit' || !/^\d$/.test(t.s)) break;
+    literal += t.s;
+  }
+  if (literal === '') return undefined;
+  return { slash, numStart, numLen, denLen: 0, fixedDen: Number(literal) };
+}
+
+/**
+ * Best rational approximation of `x` with a denominator no larger than `maxDen`,
+ * by continued fractions - the same routine as packages/formats/src/numfmt.ts.
+ *
+ * Rounding `x * maxDen` would be wrong: with a one-digit denominator, 0.7 is
+ * closer to 5/7 than to the 6/9 naive rounding gives.
+ */
+function bestFraction(x: number, maxDen: number): { num: number; den: number } {
+  if (!Number.isFinite(x) || maxDen < 1) return { num: 0, den: 1 };
+  let h0 = 0;
+  let h1 = 1;
+  let k0 = 1;
+  let k1 = 0;
+  let b = x;
+  for (let step = 0; step < 40; step++) {
+    const a = Math.floor(b);
+    const h2 = a * h1 + h0;
+    const k2 = a * k1 + k0;
+    if (k2 > maxDen) {
+      if (k1 > 0) {
+        const j = Math.floor((maxDen - k0) / k1);
+        const hs = j * h1 + h0;
+        const ks = j * k1 + k0;
+        if (ks >= 1 && Math.abs(x - hs / ks) < Math.abs(x - h1 / k1)) return { num: hs, den: ks };
+      }
+      break;
+    }
+    h0 = h1;
+    h1 = h2;
+    k0 = k1;
+    k1 = k2;
+    const rem = b - a;
+    if (rem < 1e-12) break;
+    b = 1 / rem;
+    if (!Number.isFinite(b)) break;
+  }
+  return k1 === 0 ? { num: Math.round(x), den: 1 } : { num: h1, den: k1 };
+}
+
+function formatFractionSection(
+  value: number,
+  tokens: NumToken[],
+  spec: { slash: number; numStart: number; numLen: number; denLen: number; fixedDen?: number },
+  generalText: string,
+): string {
+  const intPh: ('0' | '#' | '?')[] = [];
+  for (let i = 0; i < spec.numStart; i++) {
+    const t = tokens[i]!;
+    if (t.t === 'ph') intPh.push(t.c);
+  }
+  const hasInteger = intPh.length > 0;
+  let whole = hasInteger ? Math.floor(value) : 0;
+  const rest = value - whole;
+
+  let { num, den } =
+    spec.fixedDen !== undefined
+      ? { num: Math.round(rest * spec.fixedDen), den: spec.fixedDen }
+      : bestFraction(rest, 10 ** spec.denLen - 1);
+  if (den < 1) den = 1;
+  if (hasInteger && num >= den) {
+    // The approximation rounded the remainder up to a whole unit: 1.9999 with
+    // "# ?/?" is 2, not "1 1/1".
+    whole += Math.floor(num / den);
+    num %= den;
+  }
+  // Excel blanks the fraction rather than printing "0/1", keeping a column of
+  // fractions aligned.
+  const blank = num === 0 && hasInteger;
+
+  const digits = hasInteger ? String(whole) : '';
+  const intOut = new Array<string>(intPh.length).fill('');
+  if (intPh.length > 0) {
+    const forced = digits === '0' && !intPh.includes('0') && !blank ? '' : digits;
+    let pos = forced.length;
+    for (let k = intPh.length - 1; k >= 1 && pos > 0; k--) {
+      intOut[k] = forced[pos - 1]!;
+      pos--;
+    }
+    intOut[0] = forced.slice(0, pos);
+    for (let k = 0; k < intPh.length; k++) {
+      if (intOut[k] === '' && intPh[k] === '?') intOut[k] = ' ';
+    }
+  }
+
+  // The numerator is right-aligned in its placeholders and the denominator left-
+  // aligned, so "5   1/4  " and "5   3/10 " line up under "# ???/???".
+  const numText = blank ? '' : String(num);
+  const denText = blank || spec.fixedDen !== undefined ? '' : String(den);
+  // One entry per placeholder; a numerator too wide for its placeholders spills
+  // into the leftmost one, so "?/?" can still print 13/3.
+  const numSlots = new Array<string>(spec.numLen).fill(' ');
+  if (numText.length >= spec.numLen) {
+    numSlots[0] = numText.slice(0, numText.length - spec.numLen + 1);
+    for (let k = 1; k < spec.numLen; k++) {
+      numSlots[k] = numText[numText.length - spec.numLen + k]!;
+    }
+  } else {
+    for (let k = 0; k < numText.length; k++) numSlots[spec.numLen - numText.length + k] = numText[k]!;
+  }
+  if (blank) numSlots.fill(' ');
+  const denSlots = new Array<string>(spec.denLen).fill(' ');
+  for (let k = 0; k < denText.length && k < spec.denLen; k++) denSlots[k] = denText[k]!;
+
+  let out = '';
+  let intSeen = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (i >= spec.numStart && i < spec.slash) {
+      out += numSlots[i - spec.numStart] ?? '';
+      continue;
+    }
+    if (i > spec.slash && i <= spec.slash + spec.denLen) {
+      out += denSlots[i - spec.slash - 1] ?? '';
+      continue;
+    }
+    switch (t.t) {
+      case 'lit':
+        out += t.s === '/' && blank ? ' ' : t.s;
+        break;
+      case 'at':
+        out += generalText;
+        break;
+      case 'ph':
+        out += intOut[intSeen++] ?? '';
+        break;
+      case 'pct':
+        out += '%';
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
 function formatNumberSection(value: number, tokens: NumToken[], generalText: string): string {
   const scientific = scientificSplit(tokens);
   if (scientific) return formatScientific(value, tokens, scientific, generalText);
+  const fractionSpec = fractionSplit(tokens);
+  if (fractionSpec) return formatFractionSection(value, tokens, fractionSpec, generalText);
 
   const dotAt = tokens.findIndex((t) => t.t === 'dot');
   const intEnd = dotAt < 0 ? tokens.length : dotAt;

@@ -103,6 +103,76 @@ describe('a perpetual licence never stops working', () => {
   });
 });
 
+describe('the default context cannot revoke a perpetual licence', () => {
+  // Regression: `buildDate` used to default to the wall clock, which put a
+  // wall-clock expiry on exactly the licence that is sold as having none. Any
+  // caller that forgot to bake a build date in - and nothing in the repo passes
+  // one yet - downgraded every perpetual customer on their maintenance date.
+  it('stays perpetual decades later when no build date is baked in', () => {
+    const result = assessLicense(perpetual, KEYS.publicKey, { now: Date.UTC(2099, 0, 1) });
+    expect(result.state).toBe('perpetual');
+    expect(result.plan).toBe('pro');
+    expect(result.degraded).toBe(false);
+  });
+
+  it('stays perpetual on the day after maintenance ends with no build date', () => {
+    const result = assessLicense(perpetual, KEYS.publicKey, { now: JAN_2027 + DAY_MS });
+    expect(result.state).toBe('perpetual');
+    expect(result.plan).toBe('pro');
+  });
+
+  it('is not swayed by a clock floor either', () => {
+    const result = assessLicense(perpetual, KEYS.publicKey, {
+      now: JAN_2026,
+      clockFloor: Date.UTC(2099, 0, 1),
+    });
+    expect(result.state).toBe('perpetual');
+  });
+
+  it('treats an unknown build major as covered', () => {
+    const result = assessLicense(perpetual, KEYS.publicKey, { now: JAN_2030, buildDate: JAN_2026 });
+    expect(result.state).toBe('perpetual');
+  });
+});
+
+describe('a broken clock never costs a customer their plan', () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, undefined])(
+    'falls back to the real clock when now is %p',
+    (now) => {
+      const result = assessLicense(subscription, KEYS.publicKey, {
+        now: now as number | undefined,
+        clockFloor: JAN_2026 + 10 * DAY_MS,
+      });
+      // The floor is inside the term, so whatever the wall clock says the licence
+      // must not read as lapsed on account of an unusable `now`.
+      expect(['active', 'grace', 'lapsed']).toContain(result.state);
+      expect(result.reason).toBe('ok');
+    },
+  );
+
+  it('ignores a non-finite clock floor rather than poisoning the comparison', () => {
+    const result = assessLicense(subscription, KEYS.publicKey, {
+      now: JAN_2026 + 100 * DAY_MS,
+      clockFloor: Number.NaN,
+    });
+    expect(result.state).toBe('active');
+  });
+
+  it('ignores a non-finite grace override', () => {
+    const result = assessLicense(subscription, KEYS.publicKey, {
+      now: JAN_2027 + DAY_MS,
+      graceDays: Number.NaN,
+    });
+    expect(result.state).toBe('grace');
+  });
+
+  it('never throws on a non-finite clock', () => {
+    for (const now of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => assessLicense(perpetual, KEYS.publicKey, { now, buildDate: now })).not.toThrow();
+    }
+  });
+});
+
 describe('maintenance limits updates, not the software', () => {
   it('drops a build released after coverage ended to the free tier', () => {
     const result = assessLicense(perpetual, KEYS.publicKey, {
@@ -236,6 +306,33 @@ describe('clock rollback', () => {
       clockFloor: JAN_2026,
     });
     expect(result.state).toBe('active');
+  });
+
+  it('says the clock is why, rather than implying non-payment', () => {
+    // The high-water mark is sticky: one launch with a broken clock poisons it
+    // permanently. A customer whose subscription is fine must be told which of
+    // the two dates the software distrusted, and how to fix it.
+    const result = assessLicense(subscription, KEYS.publicKey, {
+      now: JAN_2026 + 10 * DAY_MS,
+      clockFloor: JAN_2030,
+    });
+    expect(result.state).toBe('lapsed');
+    expect(result.clockFloorApplied).toBe(true);
+    expect(result.explanation).toContain('clock');
+  });
+
+  it('does not blame the clock when the clock was not used', () => {
+    const result = assessLicense(subscription, KEYS.publicKey, { now: JAN_2030 });
+    expect(result.clockFloorApplied).toBe(false);
+    expect(result.explanation).not.toContain('clock');
+  });
+
+  it('does not flag an ordinary launch where the wall clock is ahead', () => {
+    const result = assessLicense(subscription, KEYS.publicKey, {
+      now: JAN_2026 + 200 * DAY_MS,
+      clockFloor: JAN_2026,
+    });
+    expect(result.clockFloorApplied).toBe(false);
   });
 
   it('leaves a perpetual licence untouched', () => {
