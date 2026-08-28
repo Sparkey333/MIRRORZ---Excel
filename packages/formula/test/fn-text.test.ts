@@ -480,8 +480,12 @@ describe('CHAR, CODE, UNICHAR and UNICODE', () => {
     expect(calc('UNICODE(UNICHAR(128169))')).toBe(128169);
     expect(calc('UNICODE("A")')).toBe(65);
     expect(code(calc('UNICHAR(0)'))).toBe('#VALUE!');
-    expect(code(calc('UNICHAR(55296)'))).toBe('#VALUE!');
     expect(code(calc('UNICHAR(1114112)'))).toBe('#VALUE!');
+    // A lone surrogate is the one case the documentation gives #N/A rather than
+    // #VALUE!: "If Unicode numbers are partial surrogates and data types that
+    // are not valid, UNICHAR returns the #N/A error value."
+    expect(code(calc('UNICHAR(55296)'))).toBe('#N/A');
+    expect(code(calc('UNICHAR(57343)'))).toBe('#N/A');
     expect(code(calc('UNICODE("")'))).toBe('#VALUE!');
   });
 });
@@ -562,6 +566,9 @@ describe('TEXT', () => {
     expect(calc('TEXT("5","0.00")')).toBe('5.00');
     expect(calc('TEXT("1,234.5","0.0")')).toBe('1234.5');
     expect(calc('TEXT("abc","0.00")')).toBe('abc');
+    // Blank text is not a zero: it stays text and passes through.
+    expect(calc('TEXT("","0.00")')).toBe('');
+    expect(calc('TEXT(" ","0.00")')).toBe(' ');
   });
 
   it('renders the @ placeholder, in a numeric section as well as a text one', () => {

@@ -661,8 +661,13 @@ const UNICHAR: FunctionSpec = {
   impl: (args) => {
     const n = count(args[0], 0);
     if (isError(n)) return n;
-    // Lone surrogates are not characters, and Excel refuses them.
-    if (n < 1 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) return CellError.VALUE;
+    // Two different errors, which the documentation is explicit about: "If
+    // Unicode numbers are partial surrogates and data types that are not valid,
+    // UNICHAR returns the #N/A error value. If numbers are numeric values that
+    // fall outside the allowable range, UNICHAR returns the #VALUE! error
+    // value. If number is zero (0), UNICHAR returns the #VALUE! error value."
+    if (n >= 0xd800 && n <= 0xdfff) return CellError.NA;
+    if (n < 1 || n > 0x10ffff) return CellError.VALUE;
     return String.fromCodePoint(n);
   },
 };
@@ -1381,7 +1386,9 @@ function applyFormat(value: Scalar, code: string, system: 1900 | 1904): string |
   if (typeof subject === 'string') {
     // Numeric text is formatted as the number it spells: TEXT("5","0.00") is
     // "5.00", the same coercion every other numeric argument gets.
-    const asNumber = subject === '' ? undefined : parseNumericText(subject);
+    // parseNumericText reads blank text as zero for arithmetic coercion; TEXT
+    // must not, or TEXT(" ","0.00") would invent a "0.00" out of a space.
+    const asNumber = subject.trim() === '' ? undefined : parseNumericText(subject);
     if (asNumber === undefined) {
       // Without a text section the text passes through untouched, which is why
       // TEXT("abc","0.00") is "abc" rather than an error.
