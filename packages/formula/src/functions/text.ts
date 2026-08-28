@@ -413,7 +413,10 @@ const FIND: FunctionSpec = {
     if (isError(haystack)) return haystack;
     const start = count(args[2], 1);
     if (isError(start)) return start;
-    if (start < 1 || start - 1 > haystack.length) return CellError.VALUE;
+    // Documented: "If start_num is not greater than 0 (zero) or is greater than
+    // the length of within_text, the #VALUE! error value is returned." That
+    // bound applies to the empty needle too, so FIND("","abc",4) is an error.
+    if (start < 1 || start > haystack.length) return CellError.VALUE;
     const at = haystack.indexOf(needle, start - 1);
     return at < 0 ? CellError.VALUE : at + 1;
   },
@@ -445,7 +448,8 @@ const SEARCH: FunctionSpec = {
     if (isError(haystack)) return haystack;
     const start = count(args[2], 1);
     if (isError(start)) return start;
-    if (start < 1 || start - 1 > haystack.length) return CellError.VALUE;
+    // Same bound as FIND: past the last character is #VALUE!, not a miss.
+    if (start < 1 || start > haystack.length) return CellError.VALUE;
     const hit = searchPattern(needle).exec(haystack.slice(start - 1));
     return hit === null ? CellError.VALUE : start + hit.index;
   },
@@ -504,7 +508,13 @@ const VALUE: FunctionSpec = {
     const s = text(raw as Scalar);
     if (isError(s)) return s;
 
+    // A blank cell coerces to zero, but empty *text* is not a number: Excel
+    // reports #VALUE! for VALUE(""), which is why =VALUE(TRIM(A1)) fails on an
+    // empty cell while =VALUE(A1) does not. parseNumericText maps "" to 0 for
+    // arithmetic coercion, so the emptiness has to be caught before it.
+    if (raw === null) return 0;
     const body = s.trim().replace(CURRENCY, '');
+    if (body === '') return CellError.VALUE;
     const asNumber = parseNumericText(body);
     if (asNumber !== undefined) return asNumber;
 
@@ -858,26 +868,99 @@ function tokenizeNumber(section: string): NumToken[] {
   return out;
 }
 
-function formatNumberSection(value: number, tokens: NumToken[]): string {
+/**
+ * Scientific formats: an `E` or `e` immediately followed by `+` or `-` splits
+ * the section into a mantissa and an exponent. The number of integer
+ * placeholders in the mantissa sets the exponent's step, which is what makes
+ * "##0.0E+0" an engineering format (exponents in multiples of three) while
+ * "0.00E+00" is the ordinary one.
+ */
+function scientificSplit(tokens: NumToken[]): { at: number; sign: '+' | '-' } | undefined {
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const t = tokens[i]!;
+    const next = tokens[i + 1]!;
+    if (t.t !== 'lit' || (t.s !== 'E' && t.s !== 'e')) continue;
+    if (next.t !== 'lit' || (next.s !== '+' && next.s !== '-')) continue;
+    // Only a mantissa with digit placeholders makes this an exponent form.
+    if (!tokens.slice(0, i).some((x) => x.t === 'ph')) continue;
+    if (!tokens.slice(i + 2).some((x) => x.t === 'ph')) continue;
+    return { at: i, sign: next.s };
+  }
+  return undefined;
+}
+
+function countPlaceholders(tokens: NumToken[], integerPart: boolean): number {
   const dotAt = tokens.findIndex((t) => t.t === 'dot');
   const intEnd = dotAt < 0 ? tokens.length : dotAt;
+  let n = 0;
+  tokens.forEach((t, i) => {
+    if (t.t === 'ph' && (i < intEnd) === integerPart) n++;
+  });
+  return n;
+}
 
-  // A comma is a grouping mark only when a digit placeholder still follows it in
-  // the integer part; otherwise it scales the value down by a thousand.
+function formatScientific(
+  value: number,
+  tokens: NumToken[],
+  split: { at: number; sign: '+' | '-' },
+  generalText: string,
+): string {
+  const mantissaTokens = tokens.slice(0, split.at);
+  const exponentTokens = tokens.slice(split.at + 2);
+  const intPh = mantissaTokens.filter((t): t is { t: 'ph'; c: '0' | '#' | '?' } => t.t === 'ph');
+  const dotAt = mantissaTokens.findIndex((t) => t.t === 'dot');
+  const width = Math.max(
+    1,
+    mantissaTokens.filter((t, i) => t.t === 'ph' && (dotAt < 0 || i < dotAt)).length,
+  );
+  // A mantissa of bare zeros pins the integer digit count; a '#' or '?' among
+  // them steps the exponent in multiples of that width, which is what makes
+  // "##0.0E+0" engineering notation. Same rule as packages/formats/numfmt.ts.
+  const stepped = intPh.slice(0, width).some((t) => t.c !== '0');
+  const fracPlaces = countPlaceholders(mantissaTokens, false);
+
+  let exponent = 0;
+  let mantissa = 0;
+  if (value !== 0) {
+    // toExponential rather than log10: the decimal exponent has to agree with
+    // the digits that will actually be printed, and log10(1000) is not exactly 3
+    // for every double.
+    exponent = Number(Math.abs(value).toExponential().split('e')[1]);
+    exponent = stepped ? Math.floor(exponent / width) * width : exponent - (width - 1);
+    mantissa = toExcelPrecision(Math.abs(value) / 10 ** exponent);
+    // Rounding the mantissa can carry it into the next power of ten.
+    const scale = 10 ** fracPlaces;
+    if (Math.round(toExcelPrecision(mantissa * scale)) / scale >= 10 ** width) {
+      exponent += stepped ? width : 1;
+      mantissa = toExcelPrecision(Math.abs(value) / 10 ** exponent);
+    }
+  }
+
+  const body = formatNumberSection(mantissa, mantissaTokens, generalText);
+  const digits = formatNumberSection(Math.abs(exponent), exponentTokens, generalText);
+  const sign = exponent < 0 ? '-' : split.sign === '+' ? '+' : '';
+  const e = (tokens[split.at] as { t: 'lit'; s: string }).s;
+  return `${body}${e}${sign}${digits}`;
+}
+
+function formatNumberSection(value: number, tokens: NumToken[], generalText: string): string {
+  const scientific = scientificSplit(tokens);
+  if (scientific) return formatScientific(value, tokens, scientific, generalText);
+
+  const dotAt = tokens.findIndex((t) => t.t === 'dot');
+  const intEnd = dotAt < 0 ? tokens.length : dotAt;
+  const lastPh = tokens.reduce((last, t, i) => (t.t === 'ph' ? i : last), -1);
+
+  // A comma is a grouping mark when a digit placeholder still follows it;
+  // a comma past the last placeholder - including one after the decimal
+  // placeholders, as in "0.0," - scales the value down by a thousand.
   let scale = 0;
   let grouped = false;
-  for (let i = 0; i < intEnd; i++) {
-    if (tokens[i]!.t !== 'comma') continue;
-    let placeholderFollows = false;
-    for (let j = i + 1; j < intEnd; j++) {
-      if (tokens[j]!.t === 'ph') {
-        placeholderFollows = true;
-        break;
-      }
-    }
-    if (placeholderFollows) grouped = true;
-    else scale++;
-  }
+  tokens.forEach((t, i) => {
+    if (t.t !== 'comma') return;
+    if (i > lastPh) scale++;
+    else if (i < intEnd) grouped = true;
+  });
 
   const percents = tokens.filter((t) => t.t === 'pct').length;
   let v = value * 100 ** percents;
@@ -891,15 +974,19 @@ function formatNumberSection(value: number, tokens: NumToken[]): string {
   });
 
   const { whole, fraction } = fixedDigits(Math.abs(v), fracPh.length);
-  const minWhole = intPh.filter((c) => c !== '#').length;
+  // Zeros are forced only as far left as the leftmost '0' placeholder; '#' and
+  // '?' leave an insignificant digit out, '?' holding its width with a space.
+  const firstZero = intPh.indexOf('0');
+  const minWhole = firstZero < 0 ? 0 : intPh.length - firstZero;
   let digits = whole.replace(/^0+(?=\d)/, '');
   if (digits === '0' && minWhole === 0) digits = '';
   digits = digits.padStart(minWhole, '0');
 
-  // Trailing '#' places that would only show zeros disappear, and the decimal
-  // point goes with them when nothing at all is left of the fraction.
+  // Trailing places that would only show zeros disappear unless a literal '0'
+  // holds them, and the decimal point goes with them when nothing at all is left
+  // of the fraction. A '?' drops the digit but keeps its width, below.
   let cut = fracPh.length;
-  while (cut > 0 && fracPh[cut - 1] === '#' && fraction[cut - 1] === '0') cut--;
+  while (cut > 0 && fracPh[cut - 1] !== '0' && fraction[cut - 1] === '0') cut--;
 
   const intText = grouped && digits !== '' ? group3(digits) : digits;
 
@@ -920,6 +1007,10 @@ function formatNumberSection(value: number, tokens: NumToken[]): string {
       }
       intOut[0] = intText.slice(0, pos);
     }
+    // A '?' that received no digit still reserves its width.
+    for (let k = 0; k < intPh.length; k++) {
+      if (intOut[k] === '' && intPh[k] === '?') intOut[k] = ' ';
+    }
   }
 
   let out = '';
@@ -934,8 +1025,12 @@ function formatNumberSection(value: number, tokens: NumToken[]): string {
       case 'pct':
         out += '%';
         break;
-      case 'comma':
       case 'at':
+        // The text placeholder in a numeric section shows the number the way
+        // General would: TEXT(1234.567,"@") is "1234.567".
+        out += generalText;
+        break;
+      case 'comma':
         break;
       case 'dot':
         if (cut > 0 || fracPh.length === 0) out += '.';
@@ -1057,8 +1152,9 @@ function formatDateSection(serial: number, section: string, system: 1900 | 1904)
     }
     if (token.t === 'ampm') {
       const pm = parts.hour >= 12;
-      if (token.s.toUpperCase() === 'A/P') out += pm ? 'P' : 'A';
-      else out += pm ? 'PM' : 'AM';
+      const marker = token.s.toUpperCase() === 'A/P' ? (pm ? 'P' : 'A') : pm ? 'PM' : 'AM';
+      // "AM/PM" prints upper case, "am/pm" lower: the code's own case wins.
+      out += token.s === token.s.toLowerCase() ? marker.toLowerCase() : marker;
       return;
     }
     const run = token.s;
@@ -1097,34 +1193,58 @@ function formatDateSection(serial: number, section: string, system: 1900 | 1904)
 function applyFormat(value: Scalar, code: string, system: 1900 | 1904): string | CellError {
   if (injectedFormatter) return injectedFormatter(value, code, system);
 
-  const sections = splitSections(code);
-  if (typeof value === 'string') {
-    // Only a fourth section applies to text; without one the text passes through
-    // untouched, which is why TEXT("abc","0.00") is "abc" rather than an error.
-    const textSection = sections[3];
-    if (textSection === undefined) return value;
-    return tokenizeNumber(textSection)
-      .map((t) => (t.t === 'at' ? value : t.t === 'lit' ? t.s : t.t === 'pct' ? '%' : ''))
-      .join('');
+  // Excel accepts at most four sections and drops the rest.
+  const sections = splitSections(code).slice(0, 4);
+  const carriesAt = (sec: string): boolean => tokenizeNumber(sec).some((t) => t.t === 'at');
+  const last = sections[sections.length - 1] ?? '';
+  // The text section is normally the fourth. It is also any *final* section
+  // carrying an '@', because "0.00;@" - which openpyxl and Excel both emit -
+  // means "numbers here, text there", not "positives here, negatives there".
+  // The same rule as packages/formats/src/numfmt.ts, which will replace this.
+  const trailingText = sections.length > 1 && carriesAt(last);
+  const numeric = trailingText ? sections.slice(0, -1) : sections;
+  const textSection = trailingText
+    ? last
+    : (sections[3] ?? (sections.length === 1 && carriesAt(last) ? last : undefined));
+
+  let subject: Scalar = value;
+  if (typeof subject === 'string') {
+    // Numeric text is formatted as the number it spells: TEXT("5","0.00") is
+    // "5.00", the same coercion every other numeric argument gets.
+    const asNumber = subject === '' ? undefined : parseNumericText(subject);
+    if (asNumber === undefined) {
+      // Without a text section the text passes through untouched, which is why
+      // TEXT("abc","0.00") is "abc" rather than an error.
+      if (textSection === undefined) return subject;
+      const body = subject;
+      return tokenizeNumber(textSection)
+        .map((t) => (t.t === 'at' ? body : t.t === 'lit' ? t.s : t.t === 'pct' ? '%' : ''))
+        .join('');
+    }
+    subject = asNumber;
   }
 
-  const n = toNumber(value);
+  const n = toNumber(subject);
   if (isError(n)) return n;
 
-  let section = sections[0] ?? '';
+  let section = numeric[0] ?? '';
   let magnitude = n;
-  if (n < 0 && sections.length > 1) {
-    section = sections[1]!;
+  if (n < 0 && numeric.length > 1) {
+    section = numeric[1]!;
     // The negative section supplies its own sign, if it wants one.
     magnitude = -n;
-  } else if (n === 0 && sections.length > 2) {
-    section = sections[2]!;
+  } else if (n === 0 && numeric.length > 2) {
+    section = numeric[2]!;
   }
 
   if (/^\s*general\s*$/i.test(section)) return formatNumberForConcat(magnitude);
   if (looksLikeDate(section)) return formatDateSection(magnitude, section, system);
 
-  const body = formatNumberSection(Math.abs(magnitude), tokenizeNumber(section));
+  const body = formatNumberSection(
+    Math.abs(magnitude),
+    tokenizeNumber(section),
+    formatNumberForConcat(Math.abs(magnitude)),
+  );
   return magnitude < 0 ? `-${body}` : body;
 }
 

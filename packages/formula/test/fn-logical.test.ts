@@ -92,6 +92,8 @@ describe('oracle: formulas.calc.xlsx', () => {
 const book = new Workbook();
 const s = book.addSheet('S');
 book.addSheet('Calc');
+// A third tab, so SHEET can be seen to count positions rather than guess.
+book.addSheet('Third');
 
 // A1:A5 mixes the value kinds AND and OR have to sort out; A5 stays blank.
 s.setValue(0, 0, 1);
@@ -283,6 +285,13 @@ describe('IFERROR and IFNA', () => {
 
   it('propagates an error raised by the fallback itself', () => {
     expect(code('IFERROR(1/0,1/0)')).toBe('#DIV/0!');
+  });
+
+  it('looks inside a range instead of handing the reference straight back', () => {
+    // C1:C3 is 5, #DIV/0!, 7. Passing the reference through untrapped would
+    // defeat the one thing IFERROR exists to do.
+    expect(grid('IFERROR(S!C1:C3,"z")')).toEqual([5, 'z', 7]);
+    expect(grid('IFNA(S!C1:C3,"z")')).toEqual([5, CellError.DIV0, 7]);
   });
 });
 
@@ -574,6 +583,8 @@ describe('CELL', () => {
     expect(calc('CELL("type",S!A3)')).toBe('l');
     expect(calc('CELL("type",S!A1)')).toBe('v');
     expect(calc('CELL("contents",S!A1)')).toBe(1);
+    // A worksheet function cannot return a blank; Excel reports 0.
+    expect(calc('CELL("contents",S!Z1)')).toBe(0);
   });
 
   it('is case-insensitive about the info type', () => {
@@ -610,12 +621,25 @@ describe('SHEET and SHEETS', () => {
     expect(code('SHEETS("S")')).toBe('#REF!');
   });
 
-  it('reports the workbook-wide forms as unavailable', () => {
-    // Neither the tab order nor the tab count reaches a worksheet function
-    // through FunctionContext.
-    expect(code('SHEETS()')).toBe('#N/A');
-    expect(code('SHEET()')).toBe('#N/A');
-    expect(code('SHEET(S!A1)')).toBe('#N/A');
+  it('counts the whole workbook when the reference is omitted', () => {
+    // "If omitted the number of sheets in the workbook containing the function
+    // is returned." The book here is S, Calc, Third.
+    expect(calc('SHEETS()')).toBe(3);
+  });
+
+  it('numbers sheets by tab position, 1-based', () => {
+    expect(calc('SHEET(S!A1)')).toBe(1);
+    expect(calc('SHEET(Third!A1)')).toBe(3);
+  });
+
+  it('reports its own sheet when the argument is omitted', () => {
+    // "If omitted the number of the sheet containing the function is returned."
+    expect(calc('SHEET()')).toBe(2);
+  });
+
+  it('accepts a sheet name as text, case-insensitively', () => {
+    expect(calc('SHEET("Third")')).toBe(3);
+    expect(calc('SHEET("third")')).toBe(3);
   });
 
   it('is #N/A for a sheet name that does not exist', () => {

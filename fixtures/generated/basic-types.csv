@@ -1,0 +1,22 @@
+label,value,note
+integer,42,plain int
+negative,-17,negative int
+zero,0,zero
+float,3.14159265358979,pi to 15 sig digits
+tiny,1E-300,denormal-ish
+huge,1E+300,near float max
+string,hello world,shared string
+unicode,éàü 你好 😀,"accents, CJK, emoji"
+quote,"he said ""hi""",embedded quotes
+bool_true,TRUE,boolean
+bool_false,FALSE,boolean
+empty,,blank cell
+leading_zero,007,must stay text
+looks_like_date,1-2,"must stay text, not Jan 2"
+gene_name,SEPT1,"must stay text, not a date"
+long_number,1234567890123456789,"beyond 15 sig digits, as text"
+point one,0.1,
+point two,0.2,
+sum (0.3 exactly in Excel),0.3,
+date serial 1,01/01/1900,
+leap bug serial 60,03/01/1900,

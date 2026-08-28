@@ -24,12 +24,14 @@
  * wearing an IS prefix, and they propagate like ABS does.
  *
  * Fourth, honesty about state we do not have. FunctionContext exposes cell
- * values, the date system and a fixed now - no formula text, no column widths,
- * no sheet order, no workbook path. So ISFORMULA, SHEET, the sheet-count form
- * of SHEETS, INFO, and the formatting info_types of CELL return an error saying
- * the answer is unavailable rather than a plausible-looking invention. A wrong
- * FALSE from ISFORMULA is worse than an error, because it is wrong precisely
- * for the cells the function exists to find.
+ * values, the sheet names in tab order, the date system and a fixed now - but
+ * no formula text, no column widths, no workbook path. SHEET and SHEETS are
+ * therefore answered properly from the tab list, while ISFORMULA, INFO and the
+ * formatting info_types of CELL return an error saying the answer is
+ * unavailable rather than a plausible-looking invention. A wrong FALSE from
+ * ISFORMULA is worse than an error, because it is wrong precisely for the cells
+ * the function exists to find; it stays #N/A for the same reason FORMULATEXT
+ * does in lookup.ts.
  *
  * Fifth, volatility is a predicate. CELL is not volatile when it is asked for
  * the address, row, column, contents or type of an explicit reference - all of
@@ -320,11 +322,19 @@ function trapping(name: string, caught: (e: CellError) => boolean): FunctionSpec
         ? 'The value, or an alternative when it is an error.'
         : 'The value, or an alternative when it is #N/A.',
     impl: (args, ctx) => {
-      const value = args[0];
-      if (isError(value)) {
-        if (!caught(value)) return value;
+      const raw = args[0];
+      if (isError(raw)) {
+        if (!caught(raw)) return raw;
         return branchResult(force(args[1], ctx), ctx);
       }
+      // A multi-cell range is materialised before it is inspected. IFERROR is
+      // not a reference-returning function, and passing the reference through
+      // untouched would let every error inside it escape untrapped, which is
+      // the one thing IFERROR exists to prevent.
+      const value =
+        isRef(raw) && (raw.startRow !== raw.endRow || raw.startCol !== raw.endCol)
+          ? ctx.deref(raw)
+          : raw;
       // An array is repaired element-wise, which is what IFERROR does to a
       // dynamic-array result; the fallback is forced once, and only if needed.
       if (isArray(value) && value.data.some((c) => isError(c) && caught(c))) {
@@ -546,8 +556,12 @@ const CELL: FunctionSpec = {
         return col + 1;
       case 'row':
         return row + 1;
-      case 'contents':
-        return ctx.getScalar(sheet, row, col);
+      case 'contents': {
+        // A worksheet function cannot return a blank, and Excel reports an
+        // empty cell's contents as 0.
+        const v = ctx.getScalar(sheet, row, col);
+        return v === null ? 0 : v;
+      }
       case 'type': {
         const v = ctx.getScalar(sheet, row, col);
         return v === null ? 'b' : typeof v === 'string' ? 'l' : 'v';
@@ -587,19 +601,31 @@ const INFO: FunctionSpec = {
   },
 };
 
+/** Tab position of a sheet name, 1-based, or 0 when there is no such sheet. */
+function tabNumber(name: string, ctx: FunctionContext): number {
+  const lower = name.toLowerCase();
+  return ctx.sheetNames().findIndex((s) => s.toLowerCase() === lower) + 1;
+}
+
 const SHEET: FunctionSpec = {
   name: 'SHEET',
   params: [p.ref('value', true)],
   structural: true,
   summary: 'The sheet number of a reference.',
   impl: (args, ctx) => {
-    if (args[0] !== undefined && !isRef(args[0]) && typeof args[0] !== 'string') {
-      return CellError.VALUE;
+    // "If omitted the number of the sheet containing the function is returned."
+    const arg = args[0];
+    if (arg === undefined) return tabNumber(ctx.origin.sheet, ctx);
+    if (isRef(arg)) {
+      const n = tabNumber(arg.sheet, ctx);
+      return n === 0 ? CellError.REF : n;
     }
-    if (typeof args[0] === 'string' && !ctx.hasSheet(args[0])) return CellError.NA;
-    // A sheet number is a position in tab order, and FunctionContext offers no
-    // way to enumerate the tabs.
-    return new CellError('#N/A', 'SHEET needs the workbook tab order, which the engine does not expose');
+    // A sheet name is accepted as text; one that names no sheet is #N/A.
+    if (typeof arg === 'string') {
+      const n = tabNumber(arg, ctx);
+      return n === 0 ? CellError.NA : n;
+    }
+    return CellError.REF;
   },
 };
 
@@ -608,10 +634,10 @@ const SHEETS: FunctionSpec = {
   params: [p.ref('reference', true)],
   structural: true,
   summary: 'The number of sheets a reference spans.',
-  impl: (args) => {
-    if (args[0] === undefined) {
-      return new CellError('#N/A', 'SHEETS needs the workbook tab count, which the engine does not expose');
-    }
+  impl: (args, ctx) => {
+    // "If omitted the number of sheets in the workbook containing the function
+    // is returned."
+    if (args[0] === undefined) return ctx.sheetNames().length;
     // Every reference this engine builds lives on exactly one sheet; a 3-D
     // reference has already collapsed into an array by the time it arrives.
     if (!isRef(args[0])) return CellError.REF;

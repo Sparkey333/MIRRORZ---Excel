@@ -122,8 +122,11 @@ export interface GroupOptions {
 
 /** Break an encoded string into blocks a person can track with a finger. */
 export function formatGroups(text: string, options: GroupOptions = {}): string {
-  const group = options.group ?? 5;
-  const perLine = options.perLine ?? 6;
+  // A zero or negative group size makes the loop below never advance, which is a
+  // hang rather than an error, so it is clamped instead of trusted.
+  const requested = options.group ?? 5;
+  const group = Number.isFinite(requested) && requested >= 1 ? Math.floor(requested) : 5;
+  const perLine = Number.isFinite(options.perLine) ? Math.floor(options.perLine as number) : 6;
   const blocks: string[] = [];
   for (let i = 0; i < text.length; i += group) blocks.push(text.slice(i, i + group));
   if (perLine <= 0) return blocks.join('-');

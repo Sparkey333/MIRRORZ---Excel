@@ -560,6 +560,7 @@ export class Evaluator {
       iterate: (ref) =>
         this.store.iterate(ref.sheet, ref.startRow, ref.startCol, ref.endRow, ref.endCol),
       hasSheet: (name) => this.store.hasSheet(name),
+      sheetNames: () => this.store.sheetNames(),
       dateSystem: this.dateSystem,
       now: this.now,
       force: (thunk) => thunk.evaluate(),

@@ -347,9 +347,19 @@ describe('FIND and SEARCH', () => {
 
   it('finds the empty needle at the start position', () => {
     expect(calc('FIND("","abc")')).toBe(1);
-    expect(calc('FIND("","abc",4)')).toBe(4);
-    expect(code(calc('FIND("","abc",5)'))).toBe('#VALUE!');
+    expect(calc('FIND("","abc",3)')).toBe(3);
     expect(calc('SEARCH("","abc",2)')).toBe(2);
+  });
+
+  it('rejects a start_num past the last character, empty needle included', () => {
+    // Microsoft documents one rule for both functions: "If start_num is not
+    // greater than 0 (zero) or is greater than the length of within_text, the
+    // #VALUE! error value is returned." Nothing exempts an empty find_text, so
+    // the last legal start is LEN(within_text).
+    expect(code(calc('FIND("","abc",4)'))).toBe('#VALUE!');
+    expect(code(calc('SEARCH("","abc",4)'))).toBe('#VALUE!');
+    expect(code(calc('FIND("","")'))).toBe('#VALUE!');
+    expect(calc('FIND("c","abc",3)')).toBe(3);
   });
 });
 
@@ -383,7 +393,15 @@ describe('VALUE and NUMBERVALUE', () => {
     expect(calc('VALUE("(100)")')).toBe(-100);
     expect(calc('VALUE("$1,234.50")')).toBe(1234.5);
     expect(calc('VALUE("1E3")')).toBe(1000);
-    expect(calc('VALUE("")')).toBe(0);
+  });
+
+  it('separates a blank cell, which is zero, from empty text, which is not', () => {
+    // =VALUE(A1) on an empty cell is 0 because the blank coerces to zero, but
+    // empty text spells no number at all - which is why =VALUE(TRIM(A1)) is the
+    // classic #VALUE! on an empty cell.
+    expect(calc('VALUE(Data!Z1)')).toBe(0);
+    expect(code(calc('VALUE("")'))).toBe('#VALUE!');
+    expect(code(calc('VALUE("   ")'))).toBe('#VALUE!');
   });
 
   it('passes a number through and refuses a boolean', () => {
@@ -523,6 +541,59 @@ describe('TEXT', () => {
   it('scales by a thousand for each trailing comma and by a hundred for percent', () => {
     expect(calc('TEXT(1234567,"#,##0,,")')).toBe('1');
     expect(calc('TEXT(0.285,"0.0%")')).toBe('28.5%');
+  });
+
+  it('scales by a thousand for a comma past the last placeholder, wherever it sits', () => {
+    // The scaling comma does not have to be in the integer part: any comma after
+    // the last digit placeholder divides by another thousand.
+    expect(calc('TEXT(1234.567,"0.0,")')).toBe('1.2');
+    expect(calc('TEXT(1234567,"#,##0.0,,")')).toBe('1.2');
+    expect(calc('TEXT(1000,"0,")')).toBe('1');
+  });
+
+  it('gives a ? placeholder the width of the digit it is standing in for', () => {
+    expect(calc('TEXT(0.5,"?.?")')).toBe(' .5');
+    expect(calc('TEXT(5,"??0.0")')).toBe('  5.0');
+    expect(calc('TEXT(1.5,"0.??")')).toBe('1.5 ');
+    expect(calc('TEXT(1.25,"0.??")')).toBe('1.25');
+  });
+
+  it('formats numeric text as the number it spells', () => {
+    expect(calc('TEXT("5","0.00")')).toBe('5.00');
+    expect(calc('TEXT("1,234.5","0.0")')).toBe('1234.5');
+    expect(calc('TEXT("abc","0.00")')).toBe('abc');
+  });
+
+  it('renders the @ placeholder, in a numeric section as well as a text one', () => {
+    expect(calc('TEXT(1234.567,"@")')).toBe('1234.567');
+    expect(calc('TEXT("abc","(@)")')).toBe('(abc)');
+    // A trailing section carrying @ is the text section, not the negative one:
+    // "0.00;@" means numbers here, text there.
+    expect(calc('TEXT(1.5,"0.00;@")')).toBe('1.50');
+    expect(calc('TEXT(-1.5,"0.00;@")')).toBe('-1.50');
+    expect(calc('TEXT("abc","0.00;@")')).toBe('abc');
+  });
+
+  it('writes scientific and engineering notation', () => {
+    expect(calc('TEXT(123456789,"0.00E+00")')).toBe('1.23E+08');
+    expect(calc('TEXT(0.000123,"0.00E+00")')).toBe('1.23E-04');
+    expect(calc('TEXT(-12345,"0.00E+00")')).toBe('-1.23E+04');
+    expect(calc('TEXT(0,"0.00E+00")')).toBe('0.00E+00');
+    // A '-' exponent sign shows nothing for a positive exponent.
+    expect(calc('TEXT(1234.5,"0.0E-0")')).toBe('1.2E3');
+    // A '#' or '?' among the mantissa's integer places steps the exponent in
+    // multiples of their width, which is engineering notation.
+    expect(calc('TEXT(123456789,"##0.0E+0")')).toBe('123.5E+6');
+    // Rounding the mantissa up a decade moves the exponent with it.
+    expect(calc('TEXT(9.99,"0.0E+0")')).toBe('1.0E+1');
+    expect(calc('TEXT(1,"0.0e+00")')).toBe('1.0e+00');
+  });
+
+  it('takes the case of AM/PM from the format code', () => {
+    expect(calc('TEXT(0.75,"h AM/PM")')).toBe('6 PM');
+    expect(calc('TEXT(0.75,"h am/pm")')).toBe('6 pm');
+    expect(calc('TEXT(0.75,"h A/P")')).toBe('6 P');
+    expect(calc('TEXT(0.25,"h a/p")')).toBe('6 a');
   });
 
   it('spreads digits across placeholders separated by a literal', () => {

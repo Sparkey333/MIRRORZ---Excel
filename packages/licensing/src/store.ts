@@ -11,6 +11,7 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir, platform } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -56,7 +57,12 @@ export class FileTextStore implements TrialStore {
 
   write(text: string): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    const temporary = `${this.path}.tmp`;
+    // A fixed `.tmp` name is only atomic while exactly one writer exists. The
+    // suffix is per-write so a second process - a stale copy, a recovery run,
+    // the minting tool pointed at a live profile - cannot rename a half-written
+    // file of ours into place, which is the one failure this whole dance exists
+    // to prevent.
+    const temporary = `${this.path}.${randomBytes(6).toString('hex')}.tmp`;
     try {
       writeFileSync(temporary, text, { encoding: 'utf8', mode: 0o600 });
       renameSync(temporary, this.path);

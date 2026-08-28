@@ -61,6 +61,8 @@ export interface FunctionContext {
   iterate(ref: RefValue): Iterable<{ row: number; col: number; value: Scalar }>;
   /** Resolve a sheet name, or undefined when it does not exist. */
   hasSheet(name: string): boolean;
+  /** Sheet names in tab order, for SHEET, SHEETS and 3-D references. */
+  sheetNames(): readonly string[];
   /** The workbook's date system, needed by every date function. */
   readonly dateSystem: 1900 | 1904;
   /** A fixed "now" for the whole recalculation, so NOW() is consistent. */

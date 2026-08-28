@@ -59,6 +59,14 @@ export type DecodePayloadResult =
 const MAX_STRING_BYTES = 512;
 const MAX_FEATURES = 32;
 const MAX_SEATS = 100_000;
+/**
+ * ~1 January 9999, in whole days. A varint can carry a day number so large that
+ * `new Date(fromDays(n))` is outside the representable range and throws when
+ * anything tries to format it - which would put a throw inside an assessment
+ * that promises never to throw. No honest licence is dated past the year 9999,
+ * so a payload that is becomes a decode failure instead of a landmine.
+ */
+const MAX_DAY = 2_932_896;
 
 class Writer {
   private readonly bytes: number[] = [];
@@ -145,13 +153,16 @@ export function fromDays(days: number): number {
 
 // Day 0 is 1970-01-01, which no licence can legitimately carry, so zero is free
 // to mean "absent" for the two optional dates.
-function encodeOptionalDay(epochMs: number | null): number {
-  if (epochMs === null) return 0;
-  return Math.max(1, toDays(epochMs));
-}
-
 function decodeOptionalDay(days: number): number | null {
   return days === 0 ? null : fromDays(days);
+}
+
+function day(epochMs: number, field: string): number {
+  const days = toDays(epochMs);
+  if (!Number.isFinite(days) || days < 0 || days > MAX_DAY) {
+    throw new RangeError(`licence ${field} is outside the range a licence can carry`);
+  }
+  return days;
 }
 
 export function encodePayload(payload: LicensePayload): Uint8Array {
@@ -160,9 +171,11 @@ export function encodePayload(payload: LicensePayload): Uint8Array {
   writer.byte(payload.kind === 'subscription' ? 1 : 0);
   writer.varint(PLAN_CODES[payload.plan]);
   writer.varint(payload.seats);
-  writer.varint(toDays(payload.issued));
-  writer.varint(encodeOptionalDay(payload.expires));
-  writer.varint(encodeOptionalDay(payload.maintenanceExpires));
+  writer.varint(day(payload.issued, 'issue date'));
+  writer.varint(payload.expires === null ? 0 : Math.max(1, day(payload.expires, 'expiry')));
+  writer.varint(
+    payload.maintenanceExpires === null ? 0 : Math.max(1, day(payload.maintenanceExpires, 'maintenance date')),
+  );
   writer.varint(payload.major);
   writer.text(payload.id);
   writer.text(payload.email);
@@ -184,9 +197,15 @@ export function decodePayload(bytes: Uint8Array): DecodePayloadResult {
     const seats = reader.varint();
     if (seats < 1 || seats > MAX_SEATS) return { ok: false, reason: 'range' };
 
-    const issued = fromDays(reader.varint());
-    const expires = decodeOptionalDay(reader.varint());
-    const maintenanceExpires = decodeOptionalDay(reader.varint());
+    const issuedDay = reader.varint();
+    const expiresDay = reader.varint();
+    const maintenanceDay = reader.varint();
+    if (issuedDay > MAX_DAY || expiresDay > MAX_DAY || maintenanceDay > MAX_DAY) {
+      return { ok: false, reason: 'range' };
+    }
+    const issued = fromDays(issuedDay);
+    const expires = decodeOptionalDay(expiresDay);
+    const maintenanceExpires = decodeOptionalDay(maintenanceDay);
     const major = reader.varint();
 
     const id = reader.text();

@@ -18,7 +18,7 @@
  * not land in shell history or in a process listing.
  */
 
-import { generateKeyPair, makePayload, signLicense, verifyLicense } from '../src/license.js';
+import { derivePublicKey, generateKeyPair, makePayload, signLicense, verifyLicense } from '../src/license.js';
 import type { LicenseKind } from '../src/codec.js';
 import { DAY_MS } from '../src/codec.js';
 import { isPlanId } from '../src/plans.js';
@@ -37,6 +37,25 @@ function flags(argv: readonly string[]): Map<string, string> {
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
   process.exit(1);
+}
+
+/**
+ * Numeric flags, validated rather than coerced.
+ *
+ * `Number('abc')` is NaN, and a NaN that reaches the payload encoder either
+ * throws a RangeError with no context or - worse, before the encoder grew its
+ * range checks - mints a key whose dates are nonsense. A licence is a thing a
+ * customer pays for and then retypes off a receipt; it is not the place to find
+ * out that a flag was a typo.
+ */
+function integer(options: Map<string, string>, name: string, fallback: number, min: number, max: number): number {
+  const raw = options.get(name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+    fail(`--${name} must be a whole number between ${min} and ${max} (got ${JSON.stringify(raw)})`);
+  }
+  return value;
 }
 
 function main(): void {
@@ -71,9 +90,12 @@ function main(): void {
   if (kind !== 'perpetual' && kind !== 'subscription') fail('--kind must be perpetual or subscription');
 
   const now = Date.now();
-  const days = (name: string): number | null => {
-    const raw = options.get(name);
-    return raw === undefined ? null : now + Number(raw) * DAY_MS;
+  // ~100 years, which is longer than any licence anyone should write and short
+  // enough to stay inside the range the payload codec will carry.
+  const MAX_TERM_DAYS = 36_500;
+  const days = (name: string, fallback: number | null): number | null => {
+    if (!options.has(name)) return fallback;
+    return now + integer(options, name, 0, 1, MAX_TERM_DAYS) * DAY_MS;
   };
 
   const payload = makePayload({
@@ -84,19 +106,40 @@ function main(): void {
     issued: now,
     // A perpetual licence carries no expiry, ever. That is the product promise
     // and the minter refuses to write one even if asked.
-    expires: kind === 'subscription' ? days('term-days') ?? now + 365 * DAY_MS : null,
-    maintenanceExpires: days('maintenance-days') ?? (kind === 'perpetual' ? now + 365 * DAY_MS : null),
-    seats: Number(options.get('seats') ?? '1'),
-    major: Number(options.get('major') ?? '1'),
+    expires: kind === 'subscription' ? days('term-days', now + 365 * DAY_MS) : null,
+    maintenanceExpires: days('maintenance-days', kind === 'perpetual' ? now + 365 * DAY_MS : null),
+    seats: integer(options, 'seats', 1, 1, 100_000),
+    major: integer(options, 'major', 1, 0, 1_000),
     features: (options.get('features') ?? '').split(',').filter((f) => f.length > 0),
   });
 
-  const key = signLicense(payload, privateKey);
+  let key: string;
+  try {
+    key = signLicense(payload, privateKey);
+  } catch (error) {
+    fail(`could not sign: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
-  // Verify what we just minted with the same code the app runs. A licence that
-  // fails here must never reach a customer.
-  const pair = verifyLicense(key, process.env.MIRRORZ_LICENSE_PUBLIC_KEY ?? '');
-  if (process.env.MIRRORZ_LICENSE_PUBLIC_KEY && !pair.valid) fail(`self-check failed: ${pair.reason}`);
+  /**
+   * Self-check every licence with the same code the application runs, always.
+   *
+   * This used to run only when MIRRORZ_LICENSE_PUBLIC_KEY happened to be set,
+   * which is not set by the usage documented at the top of this file - so the
+   * check that exists to stop a broken key reaching a customer was, in the
+   * normal case, not running at all. The public half is derived from the private
+   * half we already hold, so there is nothing left to forget to set.
+   */
+  const publicKey = derivePublicKey(privateKey);
+  const check = verifyLicense(key, publicKey);
+  if (!check.valid) fail(`self-check failed (${check.reason}): this licence must not be sent to a customer`);
+
+  // When the build's public key is supplied, also confirm we minted with the
+  // matching private key. Minting with last year's key produces a licence that
+  // verifies here and fails on the customer's machine.
+  const shipped = process.env.MIRRORZ_LICENSE_PUBLIC_KEY;
+  if (shipped && shipped.trim() !== publicKey) {
+    fail('MIRRORZ_LICENSE_KEY does not match MIRRORZ_LICENSE_PUBLIC_KEY: this licence would not verify in that build');
+  }
 
   process.stdout.write(`${key}\n`);
 }
