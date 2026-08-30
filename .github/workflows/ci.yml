@@ -1,0 +1,52 @@
+# Typecheck and test on every push.
+#
+# Deliberately one job on one platform: the code under test here is pure
+# TypeScript with no native dependencies, so a matrix would triple the minutes
+# to re-run identical work. Platform differences that do matter - path case
+# folding, Windows device names, the macOS open-file event - are covered by
+# tests that take the platform as a parameter rather than by running on it.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # ELECTRON_SKIP_BINARY_DOWNLOAD: nothing in CI launches Electron, and the
+      # binary is a ~100 MB download on every run.
+      - name: Install
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Typecheck packages
+        run: npx tsc --build packages/*/tsconfig.json apps/cli/tsconfig.json
+
+      - name: Typecheck the desktop shell
+        run: npm run typecheck --workspace @mirrorz/desktop
+
+      - name: Test packages
+        run: npm test
+
+      - name: Test the desktop shell
+        run: npm test --workspace @mirrorz/desktop

@@ -1,0 +1,173 @@
+# Packaging for MIRRORZ Sheets.
+#
+# The governing constraint: an unsigned local build must work. Code signing is a
+# paid, identity-bound step (an Apple Developer account, an OV/EV certificate for
+# Windows) and making it a precondition would mean nobody can build the thing they
+# just cloned. So nothing here references a certificate, and `mac.identity: null`
+# disables signing rather than leaving electron-builder to search the keychain and
+# fail on a machine that has no key. What a signed release additionally needs is
+# documented in README.md, along with which warnings an unsigned build produces on
+# each platform.
+#
+# Everything the application runs is bundled by Vite before packaging - the main
+# process, the preload and the renderer - so node_modules is deliberately excluded
+# from the package. Shipping the workspace's dependency tree would add tens of
+# megabytes of source that nothing loads.
+
+appId: dev.mirrorz.sheets
+productName: MIRRORZ Sheets
+copyright: Copyright (c) MIRRORZ Sheets contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+  - '!node_modules/**/*'
+
+asar: true
+# Nothing here is a native module, so there is nothing to rebuild against
+# Electron's ABI, and skipping the attempt removes a common source of build
+# failures on machines without a C++ toolchain.
+npmRebuild: false
+removePackageScripts: true
+
+# Double-clicking a spreadsheet opens MIRRORZ. The main process resolves these
+# from argv on Windows and Linux and from the open-file event on macOS; both
+# paths run through the same validation.
+fileAssociations:
+  - ext: xlsx
+    name: Excel Workbook
+    description: Excel Workbook
+    mimeType: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    role: Editor
+  - ext: xlsm
+    name: Excel Macro-Enabled Workbook
+    description: Excel Macro-Enabled Workbook
+    mimeType: application/vnd.ms-excel.sheet.macroEnabled.12
+    role: Editor
+  - ext: xltx
+    name: Excel Template
+    description: Excel Template
+    mimeType: application/vnd.openxmlformats-officedocument.spreadsheetml.template
+    role: Editor
+  - ext: xltm
+    name: Excel Macro-Enabled Template
+    description: Excel Macro-Enabled Template
+    mimeType: application/vnd.ms-excel.template.macroEnabled.12
+    role: Editor
+  - ext: xls
+    name: Excel 97-2003 Workbook
+    description: Excel 97-2003 Workbook
+    mimeType: application/vnd.ms-excel
+    role: Viewer
+  - ext: csv
+    name: Comma Separated Values
+    description: Comma Separated Values
+    mimeType: text/csv
+    role: Editor
+  - ext: tsv
+    name: Tab Separated Values
+    description: Tab Separated Values
+    mimeType: text/tab-separated-values
+    role: Editor
+  - ext: ods
+    name: OpenDocument Spreadsheet
+    description: OpenDocument Spreadsheet
+    mimeType: application/vnd.oasis.opendocument.spreadsheet
+    role: Viewer
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  # No `certificateFile`/`certificateSubjectName`: an unsigned build is the
+  # default. SmartScreen will warn on first run until a release is signed.
+  signAndEditExecutable: true
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MIRRORZ Sheets
+  # Leaving the user's documents and settings behind on uninstall is the polite
+  # default; a spreadsheet application that deletes recovery journals on
+  # uninstall would take unsaved work with it.
+  deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  # null disables signing outright. Without it electron-builder searches the
+  # keychain for a Developer ID and fails the build when there is none.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  darkModeSupport: true
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  extendInfo:
+    NSHumanReadableCopyright: Copyright (c) MIRRORZ Sheets contributors
+    # No network access is requested anywhere in the app; declaring the absence
+    # of these is what keeps it that way when a future dependency assumes them.
+    NSAppleEventsUsageDescription: MIRRORZ Sheets does not use Apple Events.
+
+dmg:
+  writeUpdateInfo: false
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Office
+  # dpkg requires a Maintainer field on every package. It is a project address
+  # rather than a person's: this file is public, and a contributor's email in it
+  # becomes a permanent, scrapable part of every build.
+  maintainer: MIRRORZ Sheets contributors <noreply@github.com>
+  # A binary name with a space in it makes desktop-file and shell integration
+  # awkward on Linux, so the executable is named separately from the product.
+  executableName: mirrorz-sheets
+  synopsis: Offline-first spreadsheet that opens and edits Excel files
+  description: >-
+    MIRRORZ Sheets opens, edits and saves Excel-compatible spreadsheets. It works
+    entirely offline, with no account and no telemetry.
+  desktop:
+    entry:
+      StartupWMClass: mirrorz-sheets
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+deb:
+  # Chromium's own shared-library needs, plus xdg-utils, which is what actually
+  # registers the file associations from the generated .desktop entry.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+
+appImage:
+  license: ../../LICENSE
+
+# Releases are published by the GitHub Actions workflow using the GitHub CLI, so
+# electron-builder itself never needs a token and never publishes on its own.
+publish: null

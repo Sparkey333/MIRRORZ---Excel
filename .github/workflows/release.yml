@@ -1,0 +1,126 @@
+# Build installers for all three platforms on a tag, and attach them to a
+# GitHub Release.
+#
+# Each platform builds on its own runner because none of the three can be
+# produced properly from another: a .dmg needs macOS tooling, NSIS needs
+# Windows, and cross-building an AppImage produces something that works until it
+# does not. Windows and Linux use x64 runners; macOS builds both architectures,
+# since Apple silicon runners can produce an x64 slice but not the reverse.
+#
+# Every build here is UNSIGNED. That is a deliberate default rather than an
+# omission - see apps/desktop/README.md for what a signed release additionally
+# needs and which warnings users see until then. The release is published with
+# the GitHub CLI, which is preinstalled on every runner, rather than a
+# third-party action, so the workflow depends on nothing outside GitHub itself
+# except the actions GitHub publishes.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            artifact: linux
+          - os: macos-latest
+            platform: mac
+            artifact: mac
+          - os: windows-latest
+            platform: win
+            artifact: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build the renderer, main process and preload
+        run: npm run build --workspace @mirrorz/desktop
+
+      - name: Package
+        working-directory: apps/desktop
+        # --publish never: this workflow attaches the artifacts itself, so
+        # electron-builder never needs a token of its own.
+        run: npx electron-builder --${{ matrix.platform }} --publish never
+        env:
+          # Without this, electron-builder searches the keychain for a Developer
+          # ID on macOS and fails the build when the runner has none.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mirrorz-${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/latest*.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -R artifacts
+          cat > notes.md <<'NOTES'
+          These builds are unsigned. On first run:
+
+          - **Windows**: SmartScreen shows "Windows protected your PC". Choose
+            More info, then Run anyway.
+          - **macOS**: Gatekeeper refuses to open the app. Right-click it in
+            Finder, choose Open, then Open again in the dialog. On recent macOS
+            you may also need System Settings > Privacy & Security > Open Anyway.
+          - **Linux**: the AppImage needs the executable bit (`chmod +x`).
+
+          MIRRORZ Sheets works offline, has no account and sends no telemetry.
+          NOTES
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            # --draft so a person reads the generated changelog before it is public.
+            gh release create "$TAG" artifacts/* \
+              --title "MIRRORZ Sheets $TAG" \
+              --notes-file notes.md \
+              --generate-notes \
+              --draft
+          fi

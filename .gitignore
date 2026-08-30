@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+out/
+release/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+*.log
+# fixtures/generated/ is deliberately NOT ignored.
+#
+# The .calc.xlsx files hold values LibreOffice computed, and the tests assert
+# against them: they are the oracle, not a build artifact. Regenerating them on
+# each CI run would mean the assertions quietly change with whatever LibreOffice
+# version the runner happens to carry, which is the opposite of a reference.
+# Committing them also keeps CI hermetic - no Python, no LibreOffice, no apt.
+# Regenerate deliberately with `npm run fixtures` and review the diff.
+.vite/
+.turbo/
+scratch-tmp/

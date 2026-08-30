@@ -1,0 +1,99 @@
+{
+  "basic-types": {
+    "sheets": [
+      "Types"
+    ],
+    "focus": "primitive types + numeric/date edge cases",
+    "bytes": 5570,
+    "converted": [
+      "basic-types.xls",
+      "basic-types.ods",
+      "basic-types.csv"
+    ],
+    "recalculated": "basic-types.calc.xlsx"
+  },
+  "formulas": {
+    "sheets": [
+      "Data",
+      "Formulas"
+    ],
+    "cases": 139,
+    "focus": "formula breadth; col C holds live formulas, col B the same text for reference",
+    "bytes": 9738,
+    "converted": [
+      "formulas.xls",
+      "formulas.ods",
+      "formulas.csv"
+    ],
+    "recalculated": "formulas.calc.xlsx"
+  },
+  "styling": {
+    "sheets": [
+      "Styles"
+    ],
+    "numberFormats": 17,
+    "focus": "fonts, fills, borders, alignment, number-format mini-language, merges, panes",
+    "bytes": 6272,
+    "converted": [
+      "styling.xls",
+      "styling.ods",
+      "styling.csv"
+    ],
+    "recalculated": "styling.calc.xlsx"
+  },
+  "features": {
+    "sheets": [
+      "Features",
+      "Charts",
+      "Comments",
+      "HiddenSheet"
+    ],
+    "focus": "conditional formatting, data validation, tables, autofilter, hyperlinks, defined names, charts, comments, hidden sheets, tab colour",
+    "bytes": 11926,
+    "converted": [
+      "features.xls",
+      "features.ods",
+      "features.csv"
+    ],
+    "recalculated": "features.calc.xlsx"
+  },
+  "edge-cases": {
+    "sheets": [
+      "Edge'\"Case",
+      "Sparse",
+      "Wide",
+      "Refs"
+    ],
+    "focus": "quoted sheet names, extreme sparse addresses, wide sheets, cross-sheet refs",
+    "bytes": 7888,
+    "converted": [
+      "edge-cases.xls",
+      "edge-cases.ods",
+      "edge-cases.csv"
+    ],
+    "recalculated": "edge-cases.calc.xlsx"
+  },
+  "precedence": {
+    "sheets": [
+      "Precedence"
+    ],
+    "cases": 56,
+    "focus": "operator precedence quirks, numeric fidelity, coercion, range operators",
+    "bytes": 6582,
+    "converted": [
+      "precedence.xls",
+      "precedence.ods",
+      "precedence.csv"
+    ],
+    "recalculated": "precedence.calc.xlsx"
+  },
+  "large": {
+    "sheets": [
+      "Big"
+    ],
+    "rows": 50001,
+    "cols": 20,
+    "focus": "parser throughput and memory",
+    "bytes": 5458335
+  }
+}
